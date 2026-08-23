@@ -1,22 +1,24 @@
--- Détection des périphériques
-local monitor = peripheral.find("monitor")
-local radar = peripheral.find("create_radar_bearing") 
-          or peripheral.find("radar") 
-          or peripheral.find("advanced_radar")
+-- Connexion directe aux périphériques détectés
+local monitor = peripheral.wrap("monitor_3") or peripheral.find("monitor")
+local radar = peripheral.wrap("radar_bearing_0") 
+          or peripheral.find("create_radar_bearing") 
+          or peripheral.find("radar")
 
-if not monitor then error("Erreur : Aucun écran détecté !") end
-if not radar then error("Erreur : Aucun radar détecté !") end
+if not monitor then error("Erreur : monitor_3 introuvable !") end
+if not radar then error("Erreur : radar_bearing_0 introuvable !") end
 
 -- Redirection de l'affichage vers l'écran
 term.redirect(monitor)
 monitor.setTextScale(0.5)
+monitor.setBackgroundColor(colors.black)
+monitor.setTextColor(colors.green)
 
 while true do
-    term.clear()
+    monitor.clear()
     term.setCursorPos(1, 1)
     
     print("=== TELEMETRIE RADAR ===")
-    print("")
+    print("------------------------")
 
     -- Récupération des cibles
     local targets = {}
@@ -28,16 +30,22 @@ while true do
         targets = radar.scan()
     end
 
-    if #targets == 0 then
-        print("Aucune cible détectée...")
+    if not targets or #targets == 0 then
+        monitor.setTextColor(colors.yellow)
+        print("\nAucune cible detectee...")
+        monitor.setTextColor(colors.green)
     else
         for i, target in ipairs(targets) do
             local name = target.name or target.type or ("Cible #" .. i)
-            local x = math.floor(target.x or target.posX or 0)
-            local y = math.floor(target.y or target.posY or 0)
-            local z = math.floor(target.z or target.posZ or 0)
+            local pos = target.position or target
+            local x = math.floor(pos.x or pos.posX or 0)
+            local y = math.floor(pos.y or pos.posY or 0)
+            local z = math.floor(pos.z or pos.posZ or 0)
             
+            monitor.setTextColor(colors.white)
             print(string.format("[%d] %s", i, name))
+            
+            monitor.setTextColor(colors.lightGray)
             print(string.format("    X:%d Y:%d Z:%d", x, y, z))
         end
     end
