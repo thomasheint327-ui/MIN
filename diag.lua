@@ -12,20 +12,7 @@ if not radar then
     error("Aucun radar trouve !")
 end
 
-local t = radar.getTracks()
-
-local found = 0
-for i, track in ipairs(t) do
-    if track.category == "CONTRAPTION" then
-        found = found + 1
-        print("=== CONTRAPTION #" .. found .. " ===")
-        print(textutils.serialize(track))
-        print("-----------------------------------")
-    end
-end
-
-if found == 0 then
-    print("Aucune cible CONTRAPTION detectee.")
-else
-    print(found .. " contraption(s) trouvee(s).")
+print("=== METHODES DISPONIBLES SUR LE RADAR ===")
+for _, method in ipairs(peripheral.getMethods(peripheral.getName(radar))) do
+    print(" - " .. method)
 end
