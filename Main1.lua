@@ -1,12 +1,10 @@
--- Détection automatique sur le réseau filaire
 local monitor = peripheral.find("monitor")
 local radar = peripheral.find("create_radar:radar_bearing")
 
--- Recherche poussée si peripheral.find n'a pas capturé le mod
+-- Si le radar n'est pas trouvé sous ce nom, on cherche "radar"
 if not radar then
     for _, name in ipairs(peripheral.getNames()) do
-        local ptype = peripheral.getType(name) or ""
-        if name:find("radar") or ptype:find("radar") then
+        if name:find("radar") then
             radar = peripheral.wrap(name)
             break
         end
@@ -16,60 +14,64 @@ end
 if not monitor then error("Erreur : Aucun ecran trouve sur le reseau !") end
 if not radar then error("Erreur : Aucun radar trouve sur le reseau !") end
 
--- Redirection vers l'écran
 term.redirect(monitor)
-local w, h = monitor.getSize()
 monitor.setTextScale(0.5)
-monitor.setBackgroundColor(colors.black)
-monitor.setTextColor(colors.green)
 
 while true do
+    monitor.setBackgroundColor(colors.black)
     monitor.clear()
     term.setCursorPos(1, 1)
 
+    monitor.setTextColor(colors.green)
     print("=== TELEMETRIE RADAR ===")
     print("------------------------")
 
-    -- Récupération des cibles (protégée par pcall)
-    local targets = {}
-    local ok, result = pcall(function()
-        if radar.getDetectedTargets then
-            return radar.getDetectedTargets()
-        elseif radar.getEntities then
-            return radar.getEntities()
-        elseif radar.scan then
-            return radar.scan()
-        end
-        return {}
-    end)
+    -- On récupère les pistes (tracks) avec la bonne fonction
+    local ok, tracks = pcall(function() return radar.getTracks() end)
 
-    if ok and result then
-        targets = result
+    if ok and tracks then
+        if #tracks == 0 then
+            monitor.setTextColor(colors.yellow)
+            print("\nAucune cible detectee...")
+        else
+            for i, track in ipairs(tracks) do
+                -- On cherche le nom (ex: "TT1" du transponder) ou on affiche le type d'entité (ex: zombie)
+                local name = track.name or track.entityType or "Cible Inconnue"
+                
+                -- Récupération de la position (d'après ta capture d'écran)
+                local pos = track.position or {}
+                local x = math.floor(pos.x or 0)
+                local y = math.floor(pos.y or 0)
+                local z = math.floor(pos.z or 0)
+                
+                -- Nettoyage du nom pour que ce soit plus joli (enlève le "entity.minecraft.")
+                name = string.gsub(name, "entity.minecraft.", "")
+                name = string.gsub(name, "create:", "")
+
+                -- Couleur différente selon si c'est hostile, animal, ou machine (ton vaisseau)
+                if track.category == "HOSTILE" then
+                    monitor.setTextColor(colors.red)
+                else
+                    monitor.setTextColor(colors.cyan)
+                end
+                
+                print(string.format("[%d] %s", i, string.upper(name)))
+                
+                -- Affichage de l'ID du transponder si on le trouve
+                if track.id and type(track.id) == "string" and string.len(track.id) < 15 then
+                    monitor.setTextColor(colors.orange)
+                    print(string.format("    ID: %s", track.id))
+                end
+
+                monitor.setTextColor(colors.white)
+                print(string.format("    X:%d Y:%d Z:%d", x, y, z))
+            end
+        end
     else
         monitor.setTextColor(colors.red)
-        print("Erreur lecture radar !")
-        monitor.setTextColor(colors.green)
+        print("Erreur de lecture du radar !")
     end
 
-    if not targets or #targets == 0 then
-        monitor.setTextColor(colors.yellow)
-        print("\nAucune cible detectee...")
-        monitor.setTextColor(colors.green)
-    else
-        for i, target in ipairs(targets) do
-            local name = target.name or target.type or ("Cible #" .. i)
-            local pos = target.position or target
-            local x = math.floor(pos.x or pos.posX or 0)
-            local y = math.floor(pos.y or pos.posY or 0)
-            local z = math.floor(pos.z or pos.posZ or 0)
-
-            monitor.setTextColor(colors.white)
-            print(string.format("[%d] %s", i, name))
-
-            monitor.setTextColor(colors.lightGray)
-            print(string.format("    X:%d Y:%d Z:%d", x, y, z))
-        end
-    end
-
+    -- Mise à jour deux fois par seconde (temps réel)
     sleep(0.5)
 end
