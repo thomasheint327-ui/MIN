@@ -1,7 +1,3 @@
--- ===================================================
--- DIAGNOSTIC RADAR — Recherche des transpondeurs
--- ===================================================
-
 local radar = peripheral.find("create_radar:radar_bearing")
 if not radar then
     for _, name in ipairs(peripheral.getNames()) do
@@ -43,4 +39,4 @@ if found == 0 then
 else
     print("---------------------------------------")
     print(found .. " cible(s) nommee(s) trouvee(s).")
-ends
+end
