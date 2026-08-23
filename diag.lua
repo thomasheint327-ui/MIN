@@ -14,29 +14,18 @@ end
 
 local t = radar.getTracks()
 
-print("Total cibles detectees : " .. #t)
-print("---------------------------------------")
-
 local found = 0
 for i, track in ipairs(t) do
-    if track.name ~= nil then
+    if track.category == "CONTRAPTION" then
         found = found + 1
-        print(i .. " NAME:" .. tostring(track.name) .. " CAT:" .. tostring(track.category) .. " ID:" .. tostring(track.id))
+        print("=== CONTRAPTION #" .. found .. " ===")
+        print(textutils.serialize(track))
+        print("-----------------------------------")
     end
 end
 
 if found == 0 then
-    print("Aucune cible avec un champ 'name' rempli.")
-    print("---------------------------------------")
-    print("Categories rencontrees dans la liste :")
-    local cats = {}
-    for _, track in ipairs(t) do
-        cats[tostring(track.category)] = true
-    end
-    for c in pairs(cats) do
-        print(" - " .. c)
-    end
+    print("Aucune cible CONTRAPTION detectee.")
 else
-    print("---------------------------------------")
-    print(found .. " cible(s) nommee(s) trouvee(s).")
+    print(found .. " contraption(s) trouvee(s).")
 end
