@@ -1,49 +1,62 @@
 local modem = peripheral.find("modem")
 if not modem then error("Pas de modem !") end
 
-local CANAL_RETOUR = 65000 -- Notre canal d'écoute secret pour le radar
+local CANAL_RETOUR = 65000
 modem.open(CANAL_RETOUR)
 
 term.clear()
 term.setCursorPos(1,1)
 term.setTextColor(colors.red)
-print("=== SONAR ACTIF LANCE ===")
-term.setTextColor(colors.yellow)
-print("Bombardement des 65535 canaux en cours...")
+print("=== SONAR ACTIF CONTINU LANCE ===")
+term.setTextColor(colors.gray)
+print("Appuie sur Ctrl+T pour forcer l'arret.")
+print("-----------------------------------")
 
--- 1. PHASE DE BRUTE FORCE (BOMBARDEMENT)
-for canal = 1, 65535 do
-    -- On envoie un paquet qui ressemble à une commande système
-    -- En espérant que la cible essaie d'y répondre !
-    modem.transmit(canal, CANAL_RETOUR, {cmd="PING", auth="ADMIN"})
-    
-    -- Pause microscopique tous les 1000 messages pour ne pas faire
-    -- crasher notre propre ordinateur sous la charge de calcul.
-    if canal % 1000 == 0 then sleep(0) end 
-end
+local cibleTrouvee = false
 
-term.setTextColor(colors.green)
-print("Balayage termine. Ecoute de l'echo radar (5 secondes)...")
-term.setTextColor(colors.white)
+-- Boucle infinie tant qu'on n'a pas de cible
+while not cibleTrouvee do
+    term.setTextColor(colors.yellow)
+    print("[*] Balayage des 65535 canaux en cours...")
 
--- 2. PHASE D'ÉCOUTE RADAR (INTERCEPTION DES RÉPONSES)
-local timer = os.startTimer(5) -- On écoute pendant 5 secondes
+    -- 1. PHASE DE PING (BOMBARDEMENT)
+    for canal = 1, 65535 do
+        modem.transmit(canal, CANAL_RETOUR, {cmd="PING", auth="ADMIN"})
+        if canal % 1000 == 0 then sleep(0) end 
+    end
 
-while true do
-    local event, side, repCanal, replyChannel, message, distance = os.pullEvent()
-    
-    if event == "modem_message" then
-        term.setTextColor(colors.purple)
-        print("[!] CIBLE DETECTEE [!]")
-        term.setTextColor(colors.white)
-        print(" -> Distance  : " .. math.floor(distance) .. " blocs")
-        print(" -> Message   : " .. tostring(message))
+    term.setTextColor(colors.cyan)
+    print("[*] Ecoute de l'echo (3 secondes)...")
+
+    -- 2. PHASE D'ÉCOUTE
+    local timer = os.startTimer(3) -- On écoute 3 secondes pour aller plus vite
+    local listening = true
+
+    while listening do
+        local event, side, repCanal, replyChannel, message, distance = os.pullEvent()
         
-    elseif event == "timer" and side == timer then
-        term.setTextColor(colors.gray)
-        print("Fin du scan. Aucune autre cible n'a mordu a l'hamecon.")
-        break
+        if event == "modem_message" then
+            -- CIBLE TROUVÉE !
+            term.setTextColor(colors.purple)
+            print("\n[!] CIBLE DETECTEE [!]")
+            term.setTextColor(colors.white)
+            print(" -> Distance  : " .. math.floor(distance) .. " blocs")
+            print(" -> Canal rep : " .. tostring(replyChannel))
+            print(" -> Message   : " .. tostring(message))
+            
+            -- On casse les deux boucles
+            cibleTrouvee = true
+            listening = false 
+            
+        elseif event == "timer" and side == timer then
+            -- RIEN TROUVÉ, ON RECOMMENCE
+            term.setTextColor(colors.gray)
+            print("[-] Echo vide. Relance du radar...\n")
+            listening = false -- On sort de l'écoute pour relancer le grand balayage
+        end
     end
 end
 
 modem.close(CANAL_RETOUR)
+term.setTextColor(colors.green)
+print("\n[+] Fin de la traque. Cible verrouillee.")
