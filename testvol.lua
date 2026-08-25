@@ -1,9 +1,9 @@
 -- ===================================================
--- SYSTEME DE GUIDAGE MISSILE AVANCÉ (20 Hz)
--- CONFIGURATION : COMPOSANTS EN CONTACT DIRECT
+-- LOGICIEL DE GUIDAGE ET TELEMETRIE EMBARQUEE (20 Hz)
+-- Fichier : testvol.lua (ou startup.lua)
 -- ===================================================
 
--- 1. DETECTION DE TOUS LES PERIPHERIQUES
+-- 1. DÉTECTION DIRECTE DES COMPOSANTS
 local modem = peripheral.find("modem", function(_, o) return o.isWireless() end)
 local thruster = peripheral.find("creative_vector_thruster") 
               or peripheral.find("vector_thruster") 
@@ -17,11 +17,13 @@ if not modem then error("[-] Modem sans fil introuvable !") end
 if not thruster then error("[-] Vector Thruster introuvable !") end
 
 local CANAL_TIR = 1337
-local FACE_EXPLOSIF = "top" -- Face où est posée la TNT
+local CANAL_TELEMETRIE = 1338
+local FACE_EXPLOSIF = "top"
+
 modem.open(CANAL_TIR)
 
--- Adaptation universelle de l'API Thruster
-local function reglerPoussee(valeur) -- 0.0 à 1.0
+-- Fonctions de pilotage Thruster
+local function reglerPoussee(valeur)
     if thruster.setPowerNormalized then
         thruster.setPowerNormalized(valeur)
     elseif thruster.setThrustNormalized then
@@ -29,7 +31,7 @@ local function reglerPoussee(valeur) -- 0.0 à 1.0
     end
 end
 
-local function reglerVecteur(vx, vz) -- -1.0 à 1.0
+local function reglerVecteur(vx, vz)
     if thruster.setVector then
         thruster.setVector(vx, vz)
     else
@@ -48,20 +50,20 @@ end
 
 couperPropulsion()
 
--- Affichage du statut des capteurs au démarrage
+-- Statut initial au terminal
 term.clear()
 term.setCursorPos(1, 1)
 term.setTextColor(colors.orange)
-print("=== MISSILE GUIDAGE CAPTEURS DIRECTS (20 Hz) ===")
+print("=== MISSILE OPERATIONNEL (20 Hz) ===")
 term.setTextColor(colors.white)
-print("Modem Sans Fil : OK")
-print("Vector Thruster : OK")
-print("Altimetre       : " .. (altSensor and "OK (getHeight)" or "Manquant"))
-print("Vitesse Sensor  : " .. (velSensor and "OK (getVelocity)" or "Manquant"))
-print("Gimbal Sensor   : " .. (gimbSensor and "OK (getAngles)" or "Manquant"))
-print("\nEn attente d'ordre sur le canal " .. CANAL_TIR .. "...")
+print("Modem sans fil : OK")
+print("Vector Thruster: OK")
+print("Altimetre      : " .. (altSensor and "OK" or "Absent"))
+print("Vitesse Sensor : " .. (velSensor and "OK" or "Absent"))
+print("Gimbal Sensor  : " .. (gimbSensor and "OK" or "Absent"))
+print("\nEn attente d'ordre sur canal " .. CANAL_TIR .. "...")
 
--- 2. RECEPTION DES COORDONNEES CIBLE
+-- 2. ATTENTE DE L'ORDRE DE TIR
 local cibleX, cibleY, cibleZ
 while true do
     local _, _, chan, _, message = os.pullEvent("modem_message")
@@ -76,42 +78,34 @@ while true do
     end
 end
 
--- 3. FIXATION GPS INITIALE
-term.setTextColor(colors.yellow)
-print("\nFixation du point de depart GPS...")
-local startX, startY, startZ = gps.locate(2)
-if not startX then error("[-] GPS non accroche. Tir annule.") end
-term.setTextColor(colors.green)
-print("Position valide ! Allumage moteur dans 1s...")
+-- 3. VERIFICATION GPS INITIALE
+local startX = gps.locate(2)
+if not startX then error("[-] GPS introuvable. Annulation.") end
 sleep(1)
 
--- 4. BOUCLE DE GUIDAGE (20 Hz)
+-- 4. BOUCLE DE VOL & ÉMISSION DE TÉLÉMÉTRIE (20 Hz)
 term.clear()
 term.setCursorPos(1, 1)
 term.setTextColor(colors.red)
-print("=== VOL ACTIF - GUIDAGE INERTIEL ET VECTORIEL ===")
+print("=== VOL EN COURS - GUIDAGE & TRANSMISSION ===")
 
 local startTime = os.clock()
-local MAX_TEMPS_VOL = 5      -- Limite de securite pour test (5 sec)
+local MAX_TEMPS_VOL = 5      -- Securite test (5 secondes)
 local DISTANCE_IMPACT = 3.5  -- Seuil de mise a feu TNT
 
 reglerPoussee(1.0)
 
 while true do
     local tempsEcoule = os.clock() - startTime
+    local statusActuel = "EN VOL"
 
     if tempsEcoule >= MAX_TEMPS_VOL then
         couperPropulsion()
-        term.setCursorPos(1, 10)
-        term.setTextColor(colors.red)
-        print("\n[!] 5 SECONDES ECOULEES - ARRET PROPVLSION")
-        break
+        statusActuel = "ARRET"
     end
 
-    -- 1. Obtenir les coordonnees GPS
+    -- Acquisition GPS + Altitude capteur
     local cx, cy, cz = gps.locate(0.05)
-
-    -- Si l'altimetre est present, on remplace Y par sa mesure ultra-precise
     if altSensor and altSensor.getHeight then
         local altExacte = altSensor.getHeight()
         if altExacte then cy = altExacte end
@@ -123,7 +117,7 @@ while true do
         local dz = cibleZ - cz
         local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
 
-        -- 2. Obtenir la vitesse réelle pour corriger l'inertie dans les virages
+        -- Vitesse réelle
         local vx, vz = 0, 0
         if velSensor and velSensor.getVelocity then
             local v = velSensor.getVelocity()
@@ -133,49 +127,63 @@ while true do
             end
         end
 
-        -- 3. Telemetrie en temps réel
-        term.setCursorPos(1, 3)
-        term.setTextColor(colors.yellow)
-        term.clearLine()
-        print(string.format("Pos: X:%.1f Y:%.1f Z:%.1f", cx, cy, cz))
+        -- Orientation Gimbal
+        local pitch, yaw = 0, 0
+        if gimbSensor and gimbSensor.getAngles then
+            local angles = gimbSensor.getAngles()
+            if type(angles) == "table" then
+                pitch = angles.pitch or angles[1] or 0
+                yaw   = angles.yaw   or angles[2] or 0
+            end
+        end
 
-        term.setCursorPos(1, 4)
-        term.setTextColor(colors.cyan)
-        term.clearLine()
-        print(string.format("Dist Cible: %.1f m", dist))
-
-        term.setCursorPos(1, 5)
-        term.setTextColor(colors.lime)
-        term.clearLine()
-        print(string.format("Vitesse   : %.1f m/s", math.sqrt(vx*vx + vz*vz)))
-
-        -- 4. DETECTION IMPACT OU CALCUL CORRECTION VECTORIELLE
+        -- Verification impact
         if dist <= DISTANCE_IMPACT then
+            statusActuel = "IMPACT"
+        end
+
+        -- ÉMISSION RADIO TELEMETRIE LIVE VERS VALISE (Canal 1338)
+        local telemetryData = textutils.serialize({
+            x      = cx,
+            y      = cy,
+            z      = cz,
+            alt    = cy,
+            vit    = math.sqrt(vx * vx + vz * vz),
+            pitch  = pitch,
+            yaw    = yaw,
+            dist   = dist,
+            status = statusActuel
+        })
+        modem.transmit(CANAL_TELEMETRIE, CANAL_TIR, telemetryData)
+
+        -- Arret sur coupure temps ou impact
+        if statusActuel == "ARRET" then
+            term.setCursorPos(1, 9)
+            term.setTextColor(colors.red)
+            print("\n[!] TEMPS ECOULE - ARRET MOTEUR")
+            break
+        elseif statusActuel == "IMPACT" then
             couperPropulsion()
-            term.setCursorPos(1, 10)
+            term.setCursorPos(1, 9)
             term.setTextColor(colors.lime)
-            print("[+] CIBLE ATTEINTE ! DETONATION ACTIVEE.")
+            print("[+] IMPACT CONFIRME !")
             redstone.setOutput(FACE_EXPLOSIF, true)
             break
-        else
-            -- Correction d'inertie (Navigation Proportionnelle)
-            -- On retranche une partie de la vitesse actuelle pour contrer le dérapage
-            local corrX = dx - (vx * 0.4)
-            local corrZ = dz - (vz * 0.4)
-            local dist2D = math.sqrt(corrX * corrX + corrZ * corrZ)
-
-            if dist2D > 0.1 then
-                local vecX = math.max(-1.0, math.min(1.0, corrX / dist2D))
-                local vecZ = math.max(-1.0, math.min(1.0, corrZ / dist2D))
-                reglerVecteur(vecX, vecZ)
-            end
-
-            reglerPoussee(1.0)
         end
+
+        -- GUIDAGE VECTORIEL INERTIEL
+        local corrX = dx - (vx * 0.4)
+        local corrZ = dz - (vz * 0.4)
+        local dist2D = math.sqrt(corrX * corrX + corrZ * corrZ)
+
+        if dist2D > 0.1 then
+            local vecX = math.max(-1.0, math.min(1.0, corrX / dist2D))
+            local vecZ = math.max(-1.0, math.min(1.0, corrZ / dist2D))
+            reglerVecteur(vecX, vecZ)
+        end
+
+        reglerPoussee(1.0)
     end
 
     sleep(0)
 end
-
-term.setTextColor(colors.gray)
-print("\nFin de sequence de tir.")
