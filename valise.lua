@@ -1,5 +1,5 @@
 -- ===================================================
--- VALISE DE TIR ET STATION DE TELEMETRIE POCKET
+-- VALISE DE TIR & TELEMETRIE LIVE (POCKET)
 -- Fichier : valise.lua
 -- ===================================================
 
@@ -11,30 +11,64 @@ local CANAL_TELEMETRIE = 1338
 
 modem.open(CANAL_TELEMETRIE)
 
--- 1. FIXATION GPS DE LA CIBLE
+-- 1. SELECTION OU SAISIE DE LA CIBLE
 term.clear()
 term.setCursorPos(1, 1)
 term.setTextColor(colors.yellow)
-print("=== VALISE DE TIR ===")
-print("Recherche signal GPS...")
+print("=== POSTE DE TIR VALISE ===")
+term.setTextColor(colors.white)
+print("Mode de ciblage :\n")
+print("1. Coordonnees MANUELLES")
+print("2. GPS Auto (Ma Position)")
+term.setTextColor(colors.cyan)
+write("\nChoix (1/2) : ")
 
-local cibleX, cibleY, cibleZ = gps.locate(2)
-if not cibleX then error("[-] Signal GPS introuvable. Deplacement requis.") end
+local choix = read()
+local cibleX, cibleY, cibleZ
 
-term.setTextColor(colors.green)
-print(string.format("Cible : X:%.1f Y:%.1f Z:%.1f", cibleX, cibleY, cibleZ))
+if choix == "1" then
+    term.clear()
+    term.setCursorPos(1, 1)
+    term.setTextColor(colors.cyan)
+    print("=== SAISIE DE CIBLE ===")
+    term.setTextColor(colors.white)
+    write("Cible X : ") cibleX = tonumber(read())
+    write("Cible Y : ") cibleY = tonumber(read())
+    write("Cible Z : ") cibleZ = tonumber(read())
+
+    if not cibleX or not cibleY or not cibleZ then
+        error("[-] Coordonnees invalides !")
+    end
+else
+    term.clear()
+    term.setCursorPos(1, 1)
+    term.setTextColor(colors.yellow)
+    print("Recherche signal GPS...")
+    cibleX, cibleY, cibleZ = gps.locate(2)
+    if not cibleX then error("[-] Signal GPS introuvable.") end
+end
+
+-- 2. CONFIRMATION DU TIR
+term.clear()
+term.setCursorPos(1, 1)
+term.setTextColor(colors.lime)
+print("=== CIBLE VERROUILLEE ===")
+print(string.format("X : %.1f", cibleX))
+print(string.format("Y : %.1f", cibleY))
+print(string.format("Z : %.1f", cibleZ))
+
 term.setTextColor(colors.white)
 print("\n[Appuie sur une touche]")
-print("POUR ORDONNER LE TIR")
+print("POUR MISILE EN FEU !")
 os.pullEvent("key")
 
--- 2. ENVOI DE L'ORDRE DE TIR
+-- 3. ENVOI DE L'ORDRE DE TIR
 modem.transmit(CANAL_TIR, CANAL_TELEMETRIE, textutils.serialize({
     action = "LANCEMENT",
     x = cibleX, y = cibleY, z = cibleZ
 }))
 
--- 3. AFFICHAGE TELEMETRIE EN TEMPS REEL (20 Hz)
+-- 4. AFFICHAGE TELEMETRIE EN TEMPS REEL (20 Hz)
 term.clear()
 term.setCursorPos(1, 1)
 term.setTextColor(colors.red)
