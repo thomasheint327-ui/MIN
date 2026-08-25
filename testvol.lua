@@ -1,87 +1,94 @@
--- =======================================
--- VOL D'ESSAI GPS (LIMITE 4 SECONDES)
--- =======================================
-
--- Coordonnees cibles pour le test
-local CIBLE_X = 500
-local CIBLE_Y = 100
-local CIBLE_Z = -250
-
 local modem = peripheral.find("modem")
-if not modem then error("Modem requis pour capter le GPS !") end
+if not modem then error("Modem requis sur le missile !") end
 
--- Fonction de sécurité absolue
+local CANAL_TIR = 1337
+modem.open(CANAL_TIR)
+
 local function couperMoteurs()
     for _, face in ipairs(rs.getSides()) do
         rs.setAnalogOutput(face, 0)
     end
 end
 
--- On s'assure que tout est éteint avant le lancement
 couperMoteurs()
-
 term.clear()
+term.setCursorPos(1,1)
 term.setTextColor(colors.orange)
-print("=== PROTOCOLE DE TEST ===")
-print("Acquisition du signal GPS...")
+print("=== MISSILE ARME & PRET ===")
+print("En attente de l'ordre de tir...")
 
--- Vérification du GPS avant la mise à feu
-local x, y, z = gps.locate(2)
-if not x then
-    term.setTextColor(colors.red)
-    print("ECHEC : Aucun signal GPS recu. Lancement annule.")
-    return
+local cibleX, cibleY, cibleZ
+
+-- 1. ATTENTE DU SIGNAL RADIO
+while true do
+    local event, side, chan, repChan, message = os.pullEvent("modem_message")
+    if chan == CANAL_TIR then
+        -- On décode le paquet reçu
+        local data = textutils.unserialize(message)
+        if data and data.action == "LANCEMENT" then
+            cibleX = data.x
+            cibleY = data.y
+            cibleZ = data.z
+            term.setTextColor(colors.green)
+            print("\n[+] Cible verrouillee :")
+            print("X:"..cibleX.." Y:"..cibleY.." Z:"..cibleZ)
+            break
+        end
+    end
 end
 
-term.setTextColor(colors.green)
-print("GPS OK. MISE A FEU !")
-sleep(1) -- Laisse 1 seconde pour reculer si tu es à côté
+-- 2. ACQUISITION DU GPS (Ne plante plus s'il n'y a pas de signal)
+term.setTextColor(colors.yellow)
+print("\nRecherche des satellites GPS...")
+local startX, startY, startZ
 
--- Enregistre l'heure exacte (en secondes) du décollage
+while true do
+    startX, startY, startZ = gps.locate(2)
+    if startX then
+        term.setTextColor(colors.green)
+        print("Signal GPS acquis !")
+        break
+    else
+        term.setTextColor(colors.red)
+        print("Echec GPS. Nouvelle tentative...")
+        sleep(2) -- Attend 2 secondes et réessaie au lieu de crasher
+    end
+end
+
+-- 3. MISE A FEU (Test de 4 secondes)
+term.setTextColor(colors.red)
+print("\nMISE A FEU DANS 3 SECONDES !")
+sleep(3) -- Laisse le temps de reculer si tu es à côté du missile
+
 local startTime = os.clock()
 
--- Boucle de vol
 while true do
-    -- Calcul du temps écoulé
     local tempsEcoule = os.clock() - startTime
     
-    -- 1. LE COUPE-CIRCUIT (LA SECURITE)
     if tempsEcoule >= 4 then
         term.setTextColor(colors.red)
-        print("\n[!] 4 SECONDES ECOULEES [!]")
-        print("Mise hors tension des moteurs.")
+        print("\n[!] 4 SECONDES - COUPURE MOTEURS [!]")
         couperMoteurs()
-        break -- On sort de la boucle, le programme s'arrête
+        break
     end
 
-    -- 2. LE VOL (si on est sous les 4 secondes)
     local cx, cy, cz = gps.locate(1)
     
     if cx then
-        -- Affichage du chrono sur l'écran
-        term.setCursorPos(1, 5)
+        term.setCursorPos(1, 14)
         term.setTextColor(colors.white)
         print("Temps de vol : " .. string.format("%.1f", tempsEcoule) .. "s / 4.0s  ")
         
-        -- Allumage du propulseur principal arrière
+        -- Propulseur principal (Marche avant)
         rs.setAnalogOutput("back", 15) 
-
-        -- Gestion simplifiée de l'altitude pour le test
-        local dy = CIBLE_Y - cy
-        if dy > 2 then
-            rs.setAnalogOutput("bottom", 15) -- Pousse vers le haut
-        else
-            rs.setAnalogOutput("bottom", 0)  -- Coupe la poussée verticale
-        end
         
-        -- (Les corrections X/Z sont ignorées pour ce premier test de ligne droite)
-    else
-        term.setTextColor(colors.orange)
-        print("Perte GPS, vol a l'aveugle...")
+        -- Gestion altitude
+        local dy = cibleY - cy
+        if dy > 2 then
+            rs.setAnalogOutput("bottom", 15)
+        else
+            rs.setAnalogOutput("bottom", 0)
+        end
     end
-    
-    sleep(0.1) -- Met à jour les moteurs 10 fois par seconde
+    sleep(0.1)
 end
-
-term.setTextColor(colors.gray)
-print("\nFin du test. Recuperation possible.")
