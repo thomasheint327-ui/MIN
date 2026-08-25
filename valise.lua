@@ -1,120 +1,204 @@
 -- ===================================================
--- VALISE DE TIR & TELEMETRIE LIVE (POCKET)
+-- VALISE DE TIR INTERFACE GRAPHIQUE (GUI & TELEMETRIE 20Hz)
 -- Fichier : valise.lua
 -- ===================================================
 
 local modem = peripheral.find("modem", function(_, o) return o.isWireless() end)
-if not modem then error("[-] Modem sans fil introuvable sur le Pocket !") end
+if not modem then error("[-] Modem sans fil introuvable !") end
 
 local CANAL_TIR = 1337
 local CANAL_TELEMETRIE = 1338
-
 modem.open(CANAL_TELEMETRIE)
 
--- 1. SELECTION OU SAISIE DE LA CIBLE
-term.clear()
-term.setCursorPos(1, 1)
-term.setTextColor(colors.yellow)
-print("=== POSTE DE TIR VALISE ===")
-term.setTextColor(colors.white)
-print("Mode de ciblage :\n")
-print("1. Coordonnees MANUELLES")
-print("2. GPS Auto (Ma Position)")
-term.setTextColor(colors.cyan)
-write("\nChoix (1/2) : ")
+local width, height = term.getSize()
+local cibleX, cibleY, cibleZ = 0, 0, 0
 
-local choix = read()
-local cibleX, cibleY, cibleZ
-
-if choix == "1" then
-    term.clear()
-    term.setCursorPos(1, 1)
-    term.setTextColor(colors.cyan)
-    print("=== SAISIE DE CIBLE ===")
+-- --- FONCTIONS DE DESSIN GUI ---
+local function dessinerEnTete(titre)
+    term.setBackgroundColor(colors.gray)
     term.setTextColor(colors.white)
-    write("Cible X : ") cibleX = tonumber(read())
-    write("Cible Y : ") cibleY = tonumber(read())
-    write("Cible Z : ") cibleZ = tonumber(read())
-
-    if not cibleX or not cibleY or not cibleZ then
-        error("[-] Coordonnees invalides !")
-    end
-else
-    term.clear()
     term.setCursorPos(1, 1)
-    term.setTextColor(colors.yellow)
-    print("Recherche signal GPS...")
-    cibleX, cibleY, cibleZ = gps.locate(2)
-    if not cibleX then error("[-] Signal GPS introuvable.") end
+    term.clearLine()
+    local posPad = math.floor((width - #titre) / 2)
+    term.setCursorPos(math.max(1, posPad + 1), 1)
+    write(titre)
+    term.setBackgroundColor(colors.black)
 end
 
--- 2. CONFIRMATION DU TIR
-term.clear()
-term.setCursorPos(1, 1)
-term.setTextColor(colors.lime)
-print("=== CIBLE VERROUILLEE ===")
-print(string.format("X : %.1f", cibleX))
-print(string.format("Y : %.1f", cibleY))
-print(string.format("Z : %.1f", cibleZ))
+local function dessinerBouton(x, y, w, text, bgCol, fgCol)
+    term.setBackgroundColor(bgCol)
+    term.setTextColor(fgCol)
+    term.setCursorPos(x, y)
+    write(string.rep(" ", w))
+    local textPos = x + math.floor((w - #text) / 2)
+    term.setCursorPos(textPos, y)
+    write(text)
+    term.setBackgroundColor(colors.black)
+end
 
-term.setTextColor(colors.white)
-print("\n[Appuie sur une touche]")
-print("POUR MISILE EN FEU !")
-os.pullEvent("key")
+-- --- ECRAN 1 : INTERFACE DE CIBLAGE ---
+local function ecranCiblage()
+    while true do
+        term.setBackgroundColor(colors.black)
+        term.clear()
+        dessinerEnTete("VALISE DE TIR GUI")
 
--- 3. ENVOI DE L'ORDRE DE TIR
-modem.transmit(CANAL_TIR, CANAL_TELEMETRIE, textutils.serialize({
-    action = "LANCEMENT",
-    x = cibleX, y = cibleY, z = cibleZ
-}))
+        term.setTextColor(colors.yellow)
+        term.setCursorPos(2, 3) write("Cible verrouillee :")
+        
+        term.setTextColor(colors.white)
+        term.setCursorPos(3, 4) write(string.format("X : %.1f", cibleX))
+        term.setCursorPos(3, 5) write(string.format("Y : %.1f", cibleY))
+        term.setCursorPos(3, 6) write(string.format("Z : %.1f", cibleZ))
 
--- 4. AFFICHAGE TELEMETRIE EN TEMPS REEL (20 Hz)
-term.clear()
-term.setCursorPos(1, 1)
-term.setTextColor(colors.red)
-print("=== TELEMETRIE MISSILE LIVE ===")
+        -- Boutons d'action
+        dessinerBouton(2, 8,  22, "[ 1. COORDONNEES ]", colors.blue, colors.white)
+        dessinerBouton(2, 10, 22, "[ 2. GPS AUTO    ]", colors.purple, colors.white)
+        dessinerBouton(2, 13, 22, ">>> MISSILE FEU <<<", colors.red, colors.white)
 
-while true do
-    local _, _, chan, _, message = os.pullEvent("modem_message")
-    if chan == CANAL_TELEMETRIE then
-        local data = textutils.unserialize(message)
-        if data then
-            term.setCursorPos(1, 3)
-            term.setTextColor(colors.yellow)
-            term.clearLine()
-            print(string.format("Pos : %.1f, %.1f, %.1f", data.x or 0, data.y or 0, data.z or 0))
+        term.setCursorPos(2, 16)
+        term.setTextColor(colors.gray)
+        write("Clique sur un bouton...")
 
-            term.setCursorPos(1, 4)
-            term.setTextColor(colors.cyan)
-            term.clearLine()
-            print(string.format("Distance : %.1f m", data.dist or 0))
+        local event, button, x, y = os.pullEvent()
+        
+        if event == "mouse_click" or event == "monitor_touch" then
+            -- Option 1 : Saisie manuelle
+            if y == 8 then
+                term.setBackgroundColor(colors.black)
+                term.clear()
+                dessinerEnTete("SAISIE MANUELLE")
+                
+                term.setTextColor(colors.cyan)
+                term.setCursorPos(2, 4) write("Cible X : ")
+                term.setTextColor(colors.white)
+                local ix = tonumber(read())
+                
+                term.setTextColor(colors.cyan)
+                term.setCursorPos(2, 6) write("Cible Y : ")
+                term.setTextColor(colors.white)
+                local iy = tonumber(read())
+                
+                term.setTextColor(colors.cyan)
+                term.setCursorPos(2, 8) write("Cible Z : ")
+                term.setTextColor(colors.white)
+                local iz = tonumber(read())
 
-            term.setCursorPos(1, 5)
-            term.setTextColor(colors.lime)
-            term.clearLine()
-            print(string.format("Vitesse  : %.1f m/s", data.vit or 0))
+                if ix and iy and iz then
+                    cibleX, cibleY, cibleZ = ix, iy, iz
+                end
 
-            term.setCursorPos(1, 6)
-            term.setTextColor(colors.orange)
-            term.clearLine()
-            print(string.format("Altitude : %.1f m", data.alt or 0))
+            -- Option 2 : GPS Auto
+            elseif y == 10 then
+                term.setCursorPos(2, 11)
+                term.setTextColor(colors.orange)
+                write("Signal GPS...")
+                local gx, gy, gz = gps.locate(2)
+                if gx then
+                    cibleX, cibleY, cibleZ = gx, gy, gz
+                else
+                    term.setCursorPos(2, 11)
+                    term.setTextColor(colors.red)
+                    write("Echec Signal GPS !  ")
+                    sleep(1)
+                end
 
-            term.setCursorPos(1, 7)
-            term.setTextColor(colors.magenta)
-            term.clearLine()
-            print(string.format("Gimbal P/Y: %.0f / %.0f", data.pitch or 0, data.yaw or 0))
-
-            term.setCursorPos(1, 9)
-            term.setTextColor(colors.white)
-            term.clearLine()
-            print("Statut : " .. (data.status or "EN VOL"))
-
-            if data.status == "IMPACT" or data.status == "ARRET" then
-                term.setCursorPos(1, 11)
-                term.setTextColor(colors.red)
-                print(">>> FIN DE TRANSMISSION <<<")
-                break
+            -- Option 3 : LANCEMENT DU TIR
+            elseif y == 13 then
+                if cibleX ~= 0 or cibleY ~= 0 or cibleZ ~= 0 then
+                    modem.transmit(CANAL_TIR, CANAL_TELEMETRIE, textutils.serialize({
+                        action = "LANCEMENT",
+                        x = cibleX, y = cibleY, z = cibleZ
+                    }))
+                    return
+                end
             end
         end
     end
 end
+
+-- --- ECRAN 2 : TELEMETRIE LIVE (20 Hz) ---
+local function ecranTelemetrie()
+    term.setBackgroundColor(colors.black)
+    term.clear()
+    dessinerEnTete("TELEMETRIE 20Hz LIVE")
+    dessinerBouton(2, height - 1, width - 2, "[ RETOUR / ABANDON ]", colors.red, colors.white)
+
+    while true do
+        local event, p1, p2, p3, p4 = os.pullEvent()
+
+        -- Action de clic sur le bouton de retour
+        if event == "mouse_click" or event == "monitor_touch" then
+            if p3 == height - 1 then
+                break
+            end
+        end
+
+        -- Réception des paquets radio 20 Hz
+        if event == "modem_message" and p2 == CANAL_TELEMETRIE then
+            local data = textutils.unserialize(p4)
+            if data then
+                term.setBackgroundColor(colors.black)
+
+                -- Coordonnées GPS Missile
+                term.setCursorPos(2, 3)
+                term.setTextColor(colors.yellow)
+                term.clearLine()
+                write(string.format("POS : %.1f, %.1f, %.1f", data.x or 0, data.y or 0, data.z or 0))
+
+                -- Distance restante
+                term.setCursorPos(2, 4)
+                term.setTextColor(colors.cyan)
+                term.clearLine()
+                write(string.format("DIST CIBLE : %.1f m", data.dist or 0))
+
+                -- Vitesse instantanée (Velocity Sensor)
+                term.setCursorPos(2, 5)
+                term.setTextColor(colors.lime)
+                term.clearLine()
+                write(string.format("VITESSE    : %.1f m/s", data.vit or 0))
+
+                -- Altitude exacte (Altitude Sensor)
+                term.setCursorPos(2, 6)
+                term.setTextColor(colors.orange)
+                term.clearLine()
+                write(string.format("ALTITUDE   : %.1f m", data.alt or 0))
+
+                -- Gimbal Pitch / Yaw (Gimbal Sensor)
+                term.setCursorPos(2, 7)
+                term.setTextColor(colors.magenta)
+                term.clearLine()
+                write(string.format("GIMBAL P/Y : %.0f / %.0f", data.pitch or 0, data.yaw or 0))
+
+                -- Statut de vol
+                term.setCursorPos(2, 9)
+                term.clearLine()
+                if data.status == "IMPACT" then
+                    term.setBackgroundColor(colors.lime)
+                    term.setTextColor(colors.black)
+                    write(" === IMPACT CONFIRME ! === ")
+                    dessinerBouton(2, height - 1, width - 2, "[ TIR REUSSI - QUITTER ]", colors.blue, colors.white)
+                elseif data.status == "ARRET" then
+                    term.setBackgroundColor(colors.red)
+                    term.setTextColor(colors.white)
+                    write(" === TEMPS ECOULE === ")
+                    dessinerBouton(2, height - 1, width - 2, "[ TIR CORROMPU - FERMER ]", colors.gray, colors.white)
+                else
+                    term.setBackgroundColor(colors.black)
+                    term.setTextColor(colors.white)
+                    write("STATUT : " .. (data.status or "EN VOL"))
+                end
+            end
+        end
+    end
+end
+
+-- --- EXECUTION ---
+ecranCiblage()
+ecranTelemetrie()
+
+term.setBackgroundColor(colors.black)
+term.setTextColor(colors.white)
+term.clear()
+term.setCursorPos(1, 1)
+print("Session de tir terminee.")
