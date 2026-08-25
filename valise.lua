@@ -12,6 +12,7 @@ modem.open(CANAL_TELEMETRIE)
 
 local width, height = term.getSize()
 local cibleX, cibleY, cibleZ = 0, 0, 0
+local altOffset = 35
 
 -- --- MENU SELECTION DU MODE DE DEMARRAGE ---
 term.clear()
@@ -75,19 +76,19 @@ local function ecranCiblage()
         term.setCursorPos(2, 3) write("Cible verrouillee :")
         
         term.setTextColor(colors.white)
-        term.setCursorPos(3, 4) write(string.format("X : %.1f", cibleX))
-        term.setCursorPos(3, 5) write(string.format("Y : %.1f", cibleY))
-        term.setCursorPos(3, 6) write(string.format("Z : %.1f", cibleZ))
+        term.setCursorPos(3, 4) write(string.format("X:%.1f Y:%.1f Z:%.1f", cibleX, cibleY, cibleZ))
+        term.setCursorPos(3, 5) write(string.format("Survol : +%d m", altOffset))
 
-        dessinerBouton(2, 8,  22, "[ 1. COORDONNEES ]", colors.blue, colors.white)
-        dessinerBouton(2, 10, 22, "[ 2. GPS AUTO    ]", colors.purple, colors.white)
-        dessinerBouton(2, 12, 22, ">>> MISSILE FEU <<<", colors.red, colors.white)
-        dessinerBouton(2, 14, 22, "[ MAINTENANCE ]", colors.gray, colors.white)
+        dessinerBouton(2, 7,  22, "[ 1. COORDONNEES ]", colors.blue, colors.white)
+        dessinerBouton(2, 9,  22, "[ 2. ALT. SURVOL ]", colors.cyan, colors.white)
+        dessinerBouton(2, 11, 22, "[ 3. GPS AUTO    ]", colors.purple, colors.white)
+        dessinerBouton(2, 13, 22, ">>> MISSILE FEU <<<", colors.red, colors.white)
+        dessinerBouton(2, 15, 22, "[ MAINTENANCE ]", colors.gray, colors.white)
 
         local event, button, x, y = os.pullEvent()
         
         if event == "mouse_click" or event == "monitor_touch" then
-            if y == 8 then
+            if y == 7 then
                 term.setBackgroundColor(colors.black)
                 term.clear()
                 dessinerEnTete("SAISIE MANUELLE")
@@ -96,21 +97,29 @@ local function ecranCiblage()
                 term.setCursorPos(2, 6) write("Cible Y : ") cibleY = tonumber(read()) or cibleY
                 term.setCursorPos(2, 8) write("Cible Z : ") cibleZ = tonumber(read()) or cibleZ
 
-            elseif y == 10 then
-                term.setCursorPos(2, 11)
+            elseif y == 9 then
+                term.setBackgroundColor(colors.black)
+                term.clear()
+                dessinerEnTete("ALTITUDE SURVOL")
+                term.setTextColor(colors.cyan)
+                term.setCursorPos(2, 4) write("Offset Survol (m) : ")
+                altOffset = tonumber(read()) or altOffset
+
+            elseif y == 11 then
+                term.setCursorPos(2, 12)
                 term.setTextColor(colors.orange) write("Signal GPS...")
                 local gx, gy, gz = gps.locate(2)
                 if gx then cibleX, cibleY, cibleZ = gx, gy, gz end
 
-            elseif y == 12 then
+            elseif y == 13 then
                 if cibleX ~= 0 or cibleY ~= 0 or cibleZ ~= 0 then
                     modem.transmit(CANAL_TIR, CANAL_TELEMETRIE, textutils.serialize({
-                        action = "LANCEMENT", x = cibleX, y = cibleY, z = cibleZ
+                        action = "LANCEMENT", x = cibleX, y = cibleY, z = cibleZ, altOffset = altOffset
                     }))
                     return "FEU"
                 end
 
-            elseif y == 14 then
+            elseif y == 15 then
                 return "MAINTENANCE"
             end
         end

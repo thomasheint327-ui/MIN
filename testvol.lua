@@ -1,5 +1,5 @@
 -- ===================================================
--- LOGICIEL MISSILE - RUN AUTO & MAINTENANCE (20 Hz)
+-- LOGICIEL MISSILE - TOP-ATTACK SANS PID (RUN 20 Hz)
 -- Fichier : testvol.lua
 -- ===================================================
 
@@ -46,7 +46,7 @@ end
 term.clear()
 term.setCursorPos(1, 1)
 term.setTextColor(colors.orange)
-print("=== DEMARRAGE SYSTEME MISSILE ===")
+print("=== DEMARRAGE SYSTEME MISSILE (TOP-ATTACK) ===")
 term.setTextColor(colors.white)
 print("1. Mode RUN (Lancement Auto dans 3s)")
 print("2. Mode MAINTENANCE (Console Shell)")
@@ -78,7 +78,7 @@ while true do
     term.clear()
     term.setCursorPos(1, 1)
     term.setTextColor(colors.lime)
-    print("=== MISSILE READY (MODE RUN) ===")
+    print("=== MISSILE READY (TOP-ATTACK) ===")
     term.setTextColor(colors.white)
     print("Capteurs : Alt=" .. (altSensor and "OK" or "NOK") .. 
           " | Vit=" .. (velSensor and "OK" or "NOK") .. 
@@ -88,34 +88,40 @@ while true do
 
     -- Attente de l'ordre de tir
     local cibleX, cibleY, cibleZ
+    local ALTITUDE_OFFSET = 35
+
     while true do
         local _, _, chan, _, message = os.pullEvent("modem_message")
         if chan == CANAL_TIR then
             local data = textutils.unserialize(message)
             if data and data.action == "LANCEMENT" then
                 cibleX, cibleY, cibleZ = data.x, data.y, data.z
+                ALTITUDE_OFFSET = data.altOffset or 35
                 term.setTextColor(colors.green)
-                print(string.format("\n[+] Ordre recu ! Cible: X:%.1f Y:%.1f Z:%.1f", cibleX, cibleY, cibleZ))
+                print(string.format("\n[+] Ordre recu ! Cible: X:%.1f Y:%.1f Z:%.1f | Survol: +%dm", cibleX, cibleY, cibleZ, ALTITUDE_OFFSET))
                 break
             end
         end
     end
 
-    -- Accrochage GPS
-    local startX = gps.locate(2)
+    -- Accrochage GPS initial
+    local startX, startY, startZ = gps.locate(2)
     if startX then
         term.setTextColor(colors.red)
-        print("=== VOL ACTIF (20 Hz) ===")
+        print("=== VOL ACTIF : TOP-ATTACK ===")
         
         local startTime = os.clock()
-        local MAX_TEMPS_VOL = 5
+        local MAX_TEMPS_VOL = 12
         local DISTANCE_IMPACT = 3.5
+        
+        local altCibleCroisiere = math.max(startY, cibleY) + ALTITUDE_OFFSET
+        local phaseVol = "MONTEE"
 
         reglerPoussee(1.0)
 
         while true do
             local tempsEcoule = os.clock() - startTime
-            local statusActuel = "EN VOL"
+            local statusActuel = phaseVol
 
             if tempsEcoule >= MAX_TEMPS_VOL then
                 couperPropulsion()
@@ -131,7 +137,22 @@ while true do
             if cx then
                 local dx, dy, dz = cibleX - cx, cibleY - cy, cibleZ - cz
                 local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
+                local dist2D = math.sqrt(dx * dx + dz * dz)
 
+                -- 1. TRANSITION DE PHASE (MONTEE -> PIQUE)
+                if phaseVol == "MONTEE" then
+                    if cy >= altCibleCroisiere or dist2D < 10 then
+                        phaseVol = "PIQUE"
+                        statusActuel = "PIQUE"
+                    end
+                end
+
+                -- 2. VERIFICATION IMPACT
+                if dist <= DISTANCE_IMPACT then 
+                    statusActuel = "IMPACT" 
+                end
+
+                -- 3. TELEMETRIE
                 local vx, vz = 0, 0
                 if velSensor and velSensor.getVelocity then
                     local v = velSensor.getVelocity()
@@ -144,17 +165,15 @@ while true do
                     if type(angles) == "table" then pitch, yaw = angles.pitch or 0, angles.yaw or 0 end
                 end
 
-                if dist <= DISTANCE_IMPACT then statusActuel = "IMPACT" end
-
-                -- Envoi Telemetrie
                 modem.transmit(CANAL_TELEMETRIE, CANAL_TIR, textutils.serialize({
                     x = cx, y = cy, z = cz, alt = cy,
                     vit = math.sqrt(vx*vx + vz*vz), pitch = pitch, yaw = yaw,
                     dist = dist, status = statusActuel
                 }))
 
+                -- 4. ARRET ET IMPACT
                 if statusActuel == "ARRET" then
-                    print("[!] FIN DU TEMPS DE VOL.")
+                    print("[!] TEMPS DE VOL ECOULE.")
                     break
                 elseif statusActuel == "IMPACT" then
                     couperPropulsion()
@@ -163,13 +182,22 @@ while true do
                     break
                 end
 
-                -- Guidage
-                local corrX, corrZ = dx - (vx * 0.4), dz - (vz * 0.4)
-                local dist2D = math.sqrt(corrX * corrX + corrZ * corrZ)
-                if dist2D > 0.1 then
-                    reglerVecteur(math.max(-1.0, math.min(1.0, corrX / dist2D)), math.max(-1.0, math.min(1.0, corrZ / dist2D)))
+                -- 5. GUIDAGE PROPORTIONNEL SIMPLE (SANS PID)
+                if phaseVol == "MONTEE" then
+                    reglerVecteur(0.0, 0.0)
+                    reglerPoussee(1.0)
+                else
+                    local corrX, corrZ = dx - (vx * 0.4), dz - (vz * 0.4)
+                    local corrDist2D = math.sqrt(corrX * corrX + corrZ * corrZ)
+
+                    if corrDist2D > 0.1 then
+                        reglerVecteur(
+                            math.max(-1.0, math.min(1.0, corrX / corrDist2D)),
+                            math.max(-1.0, math.min(1.0, corrZ / corrDist2D))
+                        )
+                    end
+                    reglerPoussee(1.0)
                 end
-                reglerPoussee(1.0)
             end
             sleep(0)
         end
