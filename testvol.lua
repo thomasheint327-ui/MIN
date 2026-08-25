@@ -1,16 +1,26 @@
-local modem = peripheral.find("modem")
-if not modem then error("Modem requis sur le missile !") end
+-- =======================================
+-- SYSTEME DE VOL MISSILE (TEST 4 SECONDES)
+-- =======================================
+
+-- Detection automatique des peripheriques (Modem sans fil + Relais Redstone)
+local modem = peripheral.find("modem", function(name, o) return o.isWireless() end)
+local relay = peripheral.find("redstone_relay") or peripheral.wrap("redstone_relay_7")
+
+if not modem then error("Erreur: Modem sans fil introuvable sur le missile !") end
+if not relay then error("Erreur: Relais Redstone introuvable sous le modem !") end
 
 local CANAL_TIR = 1337
 modem.open(CANAL_TIR)
 
+-- Fonction de securite d'arret d'urgence
 local function couperMoteurs()
-    for _, face in ipairs(rs.getSides()) do
-        rs.setAnalogOutput(face, 0)
+    for _, side in ipairs({"top", "bottom", "left", "right", "front", "back"}) do
+        pcall(function() relay.setOutput(side, false) end)
     end
 end
 
 couperMoteurs()
+
 term.clear()
 term.setCursorPos(1,1)
 term.setTextColor(colors.orange)
@@ -19,55 +29,55 @@ print("En attente de l'ordre de tir...")
 
 local cibleX, cibleY, cibleZ
 
--- 1. ATTENTE DU SIGNAL RADIO
+-- 1. ATTENTE DU SIGNAL RADIO DU POCKET COMPUTER
 while true do
     local event, side, chan, repChan, message = os.pullEvent("modem_message")
     if chan == CANAL_TIR then
-        -- On décode le paquet reçu
         local data = textutils.unserialize(message)
         if data and data.action == "LANCEMENT" then
             cibleX = data.x
             cibleY = data.y
             cibleZ = data.z
             term.setTextColor(colors.green)
-            print("\n[+] Cible verrouillee :")
-            print("X:"..cibleX.." Y:"..cibleY.." Z:"..cibleZ)
+            print("\n[+] Order recu ! Cible verrouillee :")
+            print("X: " .. cibleX .. " | Y: " .. cibleY .. " | Z: " .. cibleZ)
             break
         end
     end
 end
 
--- 2. ACQUISITION DU GPS (Ne plante plus s'il n'y a pas de signal)
+-- 2. ACQUISITION DU GPS
 term.setTextColor(colors.yellow)
-print("\nRecherche des satellites GPS...")
+print("\nRecherche du signal GPS...")
 local startX, startY, startZ
 
 while true do
     startX, startY, startZ = gps.locate(2)
     if startX then
         term.setTextColor(colors.green)
-        print("Signal GPS acquis !")
+        print("Signal GPS fixe avec succes !")
         break
     else
         term.setTextColor(colors.red)
-        print("Echec GPS. Nouvelle tentative...")
-        sleep(2) -- Attend 2 secondes et réessaie au lieu de crasher
+        print("Recherche GPS en cours...")
+        sleep(2)
     end
 end
 
--- 3. MISE A FEU (Test de 4 secondes)
+-- 3. CHRONO & MISE A FEU (LIMITEE A 4 SECONDES)
 term.setTextColor(colors.red)
-print("\nMISE A FEU DANS 3 SECONDES !")
-sleep(3) -- Laisse le temps de reculer si tu es à côté du missile
+print("\n[!] ALLUMAGE MOTEUR DANS 3 SECONDES [!]")
+sleep(3)
 
 local startTime = os.clock()
 
 while true do
     local tempsEcoule = os.clock() - startTime
     
+    -- SECURITE DE 4 SECONDES
     if tempsEcoule >= 4 then
         term.setTextColor(colors.red)
-        print("\n[!] 4 SECONDES - COUPURE MOTEURS [!]")
+        print("\n[!] 4 SECONDES ECOULEES - COUPURE MOTEUR [!]")
         couperMoteurs()
         break
     end
@@ -79,16 +89,12 @@ while true do
         term.setTextColor(colors.white)
         print("Temps de vol : " .. string.format("%.1f", tempsEcoule) .. "s / 4.0s  ")
         
-        -- Propulseur principal (Marche avant)
-        rs.setAnalogOutput("back", 15) 
-        
-        -- Gestion altitude
-        local dy = cibleY - cy
-        if dy > 2 then
-            rs.setAnalogOutput("bottom", 15)
-        else
-            rs.setAnalogOutput("bottom", 0)
-        end
+        -- Allumage du moteur vers le bas via le relais
+        relay.setOutput("bottom", true)
     end
+    
     sleep(0.1)
 end
+
+term.setTextColor(colors.gray)
+print("\nFin du vol d'essai. Recuperation du prototype.")
