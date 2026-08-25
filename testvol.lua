@@ -1,29 +1,31 @@
 -- ===================================================
--- SYSTEME DE GUIDAGE MISSILE HAUTE FREQUENCE (20 Hz)
--- ARCHITECTURE SIMPLIFIEE : VECTOR THRUSTER NATIVE
+-- SYSTEME DE GUIDAGE MISSILE AVANCÉ (20 Hz)
+-- CONFIGURATION : COMPOSANTS EN CONTACT DIRECT
 -- ===================================================
 
--- 1. DETECTION DES PERIPHERIQUES
+-- 1. DETECTION DE TOUS LES PERIPHERIQUES
 local modem = peripheral.find("modem", function(_, o) return o.isWireless() end)
 local thruster = peripheral.find("creative_vector_thruster") 
               or peripheral.find("vector_thruster") 
               or peripheral.find("thruster")
 
+local altSensor  = peripheral.find("altitude_sensor")
+local velSensor  = peripheral.find("velocity_sensor")
+local gimbSensor = peripheral.find("gimbal_sensor")
+
 if not modem then error("[-] Modem sans fil introuvable !") end
 if not thruster then error("[-] Vector Thruster introuvable !") end
 
 local CANAL_TIR = 1337
-local FACE_EXPLOSIF = "top" -- Face de l'ordinateur où se trouve la TNT / Détonateur
+local FACE_EXPLOSIF = "top" -- Face où est posée la TNT
 modem.open(CANAL_TIR)
 
--- Fonctions d'adaptation natives pour le Thruster
+-- Adaptation universelle de l'API Thruster
 local function reglerPoussee(valeur) -- 0.0 à 1.0
     if thruster.setPowerNormalized then
         thruster.setPowerNormalized(valeur)
     elseif thruster.setThrustNormalized then
         thruster.setThrustNormalized(valeur)
-    elseif thruster.setPower then
-        thruster.setPower(valeur * 100)
     end
 end
 
@@ -46,12 +48,18 @@ end
 
 couperPropulsion()
 
+-- Affichage du statut des capteurs au démarrage
 term.clear()
 term.setCursorPos(1, 1)
 term.setTextColor(colors.orange)
-print("=== MISSILE ARCHITECTURE NETTOYEE (20 Hz) ===")
-print("Pilotage vectoriel direct via API Lua")
-print("En attente d'ordre sur le canal " .. CANAL_TIR .. "...")
+print("=== MISSILE GUIDAGE CAPTEURS DIRECTS (20 Hz) ===")
+term.setTextColor(colors.white)
+print("Modem Sans Fil : OK")
+print("Vector Thruster : OK")
+print("Altimetre       : " .. (altSensor and "OK (getHeight)" or "Manquant"))
+print("Vitesse Sensor  : " .. (velSensor and "OK (getVelocity)" or "Manquant"))
+print("Gimbal Sensor   : " .. (gimbSensor and "OK (getAngles)" or "Manquant"))
+print("\nEn attente d'ordre sur le canal " .. CANAL_TIR .. "...")
 
 -- 2. RECEPTION DES COORDONNEES CIBLE
 local cibleX, cibleY, cibleZ
@@ -68,42 +76,46 @@ while true do
     end
 end
 
--- 3. ACCROCHAGE GPS INITIAL
+-- 3. FIXATION GPS INITIALE
 term.setTextColor(colors.yellow)
-print("\nAccrochage du signal GPS...")
-local startX = gps.locate(2)
-if not startX then error("[-] GPS introuvable. Mission avortee.") end
+print("\nFixation du point de depart GPS...")
+local startX, startY, startZ = gps.locate(2)
+if not startX then error("[-] GPS non accroche. Tir annule.") end
 term.setTextColor(colors.green)
-print("GPS Fixe ! Mise a feu dans 2s...")
-sleep(2)
+print("Position valide ! Allumage moteur dans 1s...")
+sleep(1)
 
--- 4. BOUCLE DE VOL 20 Hz (TEST DE 5 SECONDES)
+-- 4. BOUCLE DE GUIDAGE (20 Hz)
 term.clear()
 term.setCursorPos(1, 1)
 term.setTextColor(colors.red)
-print("=== VOL EN COURS - GUIDAGE VECTORIEL ===")
+print("=== VOL ACTIF - GUIDAGE INERTIEL ET VECTORIEL ===")
 
 local startTime = os.clock()
-local MAX_TEMPS_VOL = 5      -- Vol de test limite a 5s
-local DISTANCE_IMPACT = 3.5  -- Seuil de mise a feu en blocs
+local MAX_TEMPS_VOL = 5      -- Limite de securite pour test (5 sec)
+local DISTANCE_IMPACT = 3.5  -- Seuil de mise a feu TNT
 
--- Allumage de la poussée initiale (100 %)
 reglerPoussee(1.0)
 
 while true do
     local tempsEcoule = os.clock() - startTime
 
-    -- Sécurité 5 secondes
     if tempsEcoule >= MAX_TEMPS_VOL then
         couperPropulsion()
-        term.setCursorPos(1, 9)
+        term.setCursorPos(1, 10)
         term.setTextColor(colors.red)
-        print("\n[!] 5 SECONDES ECOULEES - ARRET MOTEUR")
+        print("\n[!] 5 SECONDES ECOULEES - ARRET PROPVLSION")
         break
     end
 
-    -- Requete GPS ultra-rapide 20 Hz (1 tick = 0.05s)
+    -- 1. Obtenir les coordonnees GPS
     local cx, cy, cz = gps.locate(0.05)
+
+    -- Si l'altimetre est present, on remplace Y par sa mesure ultra-precise
+    if altSensor and altSensor.getHeight then
+        local altExacte = altSensor.getHeight()
+        if altExacte then cy = altExacte end
+    end
 
     if cx then
         local dx = cibleX - cx
@@ -111,53 +123,59 @@ while true do
         local dz = cibleZ - cz
         local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
 
-        -- Telemetrie
+        -- 2. Obtenir la vitesse réelle pour corriger l'inertie dans les virages
+        local vx, vz = 0, 0
+        if velSensor and velSensor.getVelocity then
+            local v = velSensor.getVelocity()
+            if type(v) == "table" then
+                vx = v.x or v[1] or 0
+                vz = v.z or v[3] or 0
+            end
+        end
+
+        -- 3. Telemetrie en temps réel
         term.setCursorPos(1, 3)
         term.setTextColor(colors.yellow)
         term.clearLine()
         print(string.format("Pos: X:%.1f Y:%.1f Z:%.1f", cx, cy, cz))
-        
+
         term.setCursorPos(1, 4)
         term.setTextColor(colors.cyan)
         term.clearLine()
-        print(string.format("Distance Cible : %.1f blocs", dist))
-        
-        term.setCursorPos(1, 5)
-        term.setTextColor(colors.white)
-        term.clearLine()
-        print(string.format("Temps de vol   : %.1fs / %.1fs", tempsEcoule, MAX_TEMPS_VOL))
+        print(string.format("Dist Cible: %.1f m", dist))
 
-        -- DETECTER IMPACT OU CALCULER DIRECTION
+        term.setCursorPos(1, 5)
+        term.setTextColor(colors.lime)
+        term.clearLine()
+        print(string.format("Vitesse   : %.1f m/s", math.sqrt(vx*vx + vz*vz)))
+
+        -- 4. DETECTION IMPACT OU CALCUL CORRECTION VECTORIELLE
         if dist <= DISTANCE_IMPACT then
             couperPropulsion()
-            term.setCursorPos(1, 9)
+            term.setCursorPos(1, 10)
             term.setTextColor(colors.lime)
-            print("[+] CIBLE ATTEINTE ! Activation detonateur.")
-            
-            -- Activation direct de la Redstone sur l'ordinateur
+            print("[+] CIBLE ATTEINTE ! DETONATION ACTIVEE.")
             redstone.setOutput(FACE_EXPLOSIF, true)
             break
         else
-            -- Calcul de l'orientation vectorielle (Axes X et Z)
-            local dist2D = math.sqrt(dx * dx + dz * dz)
+            -- Correction d'inertie (Navigation Proportionnelle)
+            -- On retranche une partie de la vitesse actuelle pour contrer le dérapage
+            local corrX = dx - (vx * 0.4)
+            local corrZ = dz - (vz * 0.4)
+            local dist2D = math.sqrt(corrX * corrX + corrZ * corrZ)
+
             if dist2D > 0.1 then
-                local vecX = math.max(-1.0, math.min(1.0, dx / dist2D))
-                local vecZ = math.max(-1.0, math.min(1.0, dz / dist2D))
+                local vecX = math.max(-1.0, math.min(1.0, corrX / dist2D))
+                local vecZ = math.max(-1.0, math.min(1.0, corrZ / dist2D))
                 reglerVecteur(vecX, vecZ)
             end
-            
+
             reglerPoussee(1.0)
         end
-    else
-        term.setCursorPos(1, 7)
-        term.setTextColor(colors.orange)
-        term.clearLine()
-        print("[!] GPS : micro-perte de signal (1 tick)")
     end
 
-    -- Pause 1 tick serveur (20 Hz)
     sleep(0)
 end
 
 term.setTextColor(colors.gray)
-print("\nFin de mission.")
+print("\nFin de sequence de tir.")
