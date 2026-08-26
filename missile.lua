@@ -49,6 +49,15 @@ local CONFIG = {
     PIQUE_LISSAGE     = 0.15,   -- filtre passe-bas sur la commande (plus bas = plus lisse)
     DIST_TRANSITION_PIQUE = 15, -- distance horizontale (m) sous laquelle on bascule en PIQUE
 
+    -- IMPORTANT : la plupart des vector thrusters (Create, VS-like) attendent
+    -- un vecteur ABSOLU (repere monde), pas relatif a l'orientation du missile.
+    -- Si USE_YAW_ROTATION=true alors que ton thruster est deja en repere monde,
+    -- tu obtiens une boucle de retroaction yaw->poussee->yaw qui produit des
+    -- trajectoires en boucle/spirale, INDEPENDAMMENT du gain choisi.
+    -- Laisse a false par defaut. Ne passe a true que si le test de
+    -- CALIBRATION (menu 3) prouve que ton thruster a besoin d'un repere local.
+    USE_YAW_ROTATION  = false,
+
     -- --- PID (reserve pour extension CLIMB/CRUISE/TERMINAL avance) ---
     PID_PITCH = { Kp = 0.9, Ki = 0.002, Kd = 0.35, max_out = 1.0 },
     PID_YAW   = { Kp = 0.9, Ki = 0.002, Kd = 0.35, max_out = 1.0 },
@@ -216,12 +225,18 @@ local function calculerCommandePique(dx, dz, vx, vz, yaw, currentVecX, currentVe
     local corrX = dx - (vx * CONFIG.PIQUE_DAMPING_V)
     local corrZ = dz - (vz * CONFIG.PIQUE_DAMPING_V)
 
-    local radYaw = math.rad(yaw)
-    local localCorrX = corrX * math.cos(radYaw) - corrZ * math.sin(radYaw)
-    local localCorrZ = corrX * math.sin(radYaw) + corrZ * math.cos(radYaw)
+    -- Repere local (body frame) seulement si explicitement active en CONFIG.
+    -- Sinon on envoie directement le vecteur monde au thruster (cas le plus
+    -- courant) : c'est ce qui evite la boucle de retroaction yaw<->poussee.
+    local corrFinalX, corrFinalZ = corrX, corrZ
+    if CONFIG.USE_YAW_ROTATION then
+        local radYaw = math.rad(yaw)
+        corrFinalX = corrX * math.cos(radYaw) - corrZ * math.sin(radYaw)
+        corrFinalZ = corrX * math.sin(radYaw) + corrZ * math.cos(radYaw)
+    end
 
-    local targetVecX = localCorrX * CONFIG.PIQUE_GAIN_P
-    local targetVecZ = localCorrZ * CONFIG.PIQUE_GAIN_P
+    local targetVecX = corrFinalX * CONFIG.PIQUE_GAIN_P
+    local targetVecZ = corrFinalZ * CONFIG.PIQUE_GAIN_P
 
     targetVecX = math.max(-CONFIG.PIQUE_MAX_BRAQ, math.min(CONFIG.PIQUE_MAX_BRAQ, targetVecX))
     targetVecZ = math.max(-CONFIG.PIQUE_MAX_BRAQ, math.min(CONFIG.PIQUE_MAX_BRAQ, targetVecZ))
@@ -313,6 +328,104 @@ local function afficherDebugLive(t, phase, cx, cy, cz, dist, vx, vz, yaw, cmdX, 
         print("[!] SATURATION - reduire PIQUE_GAIN_P si ca persiste plusieurs secondes")
     end
     term.setTextColor(colors.white)
+end
+
+-- ===================================================================
+-- 8.5 UPLOAD AUTOMATIQUE DU LOG VERS GITHUB (optionnel)
+--     Necessite un fichier "token.txt" a la racine de l'ordinateur
+--     CONTENANT UNIQUEMENT le Personal Access Token GitHub, sur une
+--     seule ligne. Ce fichier ne doit JAMAIS etre pousse sur git.
+-- ===================================================================
+local GITHUB_CONFIG = {
+    ENABLED    = false,   -- passe a true pour activer l'upload auto
+    OWNER      = "thomasheint327-ui",
+    REPO       = "<TON-REPO>",     -- a remplacer
+    BRANCH     = "main",           -- ou "master"
+    DOSSIER    = "logs",           -- dossier cible dans le repo (cree si absent)
+    TOKEN_FILE = "token.txt",
+}
+
+-- Encodeur Base64 minimal (CC:Tweaked n'en fournit pas nativement)
+local function base64Encode(data)
+    local b = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+    return ((data:gsub('.', function(x)
+        local r, byte = "", x:byte()
+        for i = 8, 1, -1 do r = r .. (byte % 2^i - byte % 2^(i-1) > 0 and "1" or "0") end
+        return r
+    end) .. "0000"):gsub("%d%d%d?%d?%d?%d?", function(x)
+        if (#x < 6) then return "" end
+        local c = 0
+        for i = 1, 6 do c = c + (x:sub(i,i) == "1" and 2^(6-i) or 0) end
+        return b:sub(c+1, c+1)
+    end) .. ({ "", "==", "=" })[#data % 3 + 1])
+end
+
+local function lireToken()
+    if not fs.exists(GITHUB_CONFIG.TOKEN_FILE) then
+        return nil, "Fichier " .. GITHUB_CONFIG.TOKEN_FILE .. " introuvable"
+    end
+    local f = fs.open(GITHUB_CONFIG.TOKEN_FILE, "r")
+    local token = f.readLine()
+    f.close()
+    if not token or token == "" then
+        return nil, "Token vide dans " .. GITHUB_CONFIG.TOKEN_FILE
+    end
+    return token
+end
+
+-- Pousse un fichier local vers le repo GitHub configure
+local function pousserLogGithub(cheminLocal, nomFichierDistant)
+    if not GITHUB_CONFIG.ENABLED then return false, "Upload GitHub desactive (GITHUB_CONFIG.ENABLED = false)" end
+
+    local token, err = lireToken()
+    if not token then return false, err end
+
+    if not fs.exists(cheminLocal) then
+        return false, "Fichier local introuvable : " .. cheminLocal
+    end
+
+    local f = fs.open(cheminLocal, "r")
+    local contenu = f.readAll()
+    f.close()
+
+    local cheminDistant = GITHUB_CONFIG.DOSSIER .. "/" .. nomFichierDistant
+    local url = string.format(
+        "https://api.github.com/repos/%s/%s/contents/%s",
+        GITHUB_CONFIG.OWNER, GITHUB_CONFIG.REPO, cheminDistant
+    )
+
+    local body = textutils.serialiseJSON({
+        message = "Upload auto log de vol : " .. nomFichierDistant,
+        content = base64Encode(contenu),
+        branch  = GITHUB_CONFIG.BRANCH,
+    })
+
+    local headers = {
+        ["Authorization"] = "token " .. token,
+        ["Content-Type"]  = "application/json",
+        ["Accept"]        = "application/vnd.github+json",
+        ["User-Agent"]    = "computercraft-missile-logger",
+    }
+
+    local ok, response = pcall(function()
+        return http.request({ url = url, body = body, headers = headers, method = "PUT" })
+    end)
+
+    if not ok then
+        return false, "Erreur requete HTTP : " .. tostring(response)
+    end
+
+    -- http.request est asynchrone : on attend l'evenement de reponse
+    while true do
+        local event, url2, handle = os.pullEvent()
+        if event == "http_success" and url2 == url then
+            handle.close()
+            return true
+        elseif event == "http_failure" and url2 == url then
+            local msg = handle and handle.readAll and handle.readAll() or "raison inconnue"
+            return false, "Echec upload GitHub : " .. tostring(msg)
+        end
+    end
 end
 
 -- ===================================================================
@@ -493,9 +606,23 @@ while true do
 
         local csvName = "vol_" .. os.date("%Y%m%d_%H%M%S") .. ".csv"
         if Blackbox:dumpCSV(csvName) then
-            print("[+] Log CSV sauvegarde : " .. csvName)
+            print("[+] Log CSV sauvegarde localement : " .. csvName)
+
+            if GITHUB_CONFIG.ENABLED then
+                print("[*] Upload vers GitHub en cours...")
+                local okUp, errUp = pousserLogGithub(csvName, csvName)
+                if okUp then
+                    print("[+] Log pousse sur GitHub : " .. GITHUB_CONFIG.DOSSIER .. "/" .. csvName)
+                else
+                    print("[!] Upload GitHub echoue : " .. tostring(errUp))
+                end
+            end
         end
     else
         print("[-] PERTE GPS. Tir avorte.")
     end
+
+    term.setTextColor(colors.gray)
+    print("\nReinitialisation du systeme dans 3 secondes...")
+    sleep(3)
 end
