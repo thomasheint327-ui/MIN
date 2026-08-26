@@ -1,5 +1,5 @@
 -- ===================================================
--- LOGICIEL MISSILE - TOP-ATTACK SANS PID (RUN 20 Hz)
+-- LOGICIEL MISSILE - TOP-ATTACK STABILISE (20 Hz)
 -- Fichier : testvol.lua
 -- ===================================================
 
@@ -46,7 +46,7 @@ end
 term.clear()
 term.setCursorPos(1, 1)
 term.setTextColor(colors.orange)
-print("=== DEMARRAGE SYSTEME MISSILE (TOP-ATTACK) ===")
+print("=== DEMARRAGE SYSTEME MISSILE (STABILISE) ===")
 term.setTextColor(colors.white)
 print("1. Mode RUN (Lancement Auto dans 3s)")
 print("2. Mode MAINTENANCE (Console Shell)")
@@ -78,7 +78,7 @@ while true do
     term.clear()
     term.setCursorPos(1, 1)
     term.setTextColor(colors.lime)
-    print("=== MISSILE READY (TOP-ATTACK) ===")
+    print("=== MISSILE READY (TOP-ATTACK STABILISE) ===")
     term.setTextColor(colors.white)
     print("Capteurs : Alt=" .. (altSensor and "OK" or "NOK") .. 
           " | Vit=" .. (velSensor and "OK" or "NOK") .. 
@@ -108,14 +108,16 @@ while true do
     local startX, startY, startZ = gps.locate(2)
     if startX then
         term.setTextColor(colors.red)
-        print("=== VOL ACTIF : TOP-ATTACK ===")
+        print("=== VOL ACTIF : TOP-ATTACK STABILISE ===")
         
         local startTime = os.clock()
-        local MAX_TEMPS_VOL = 12
+        local MAX_TEMPS_VOL = 12 -- Remis à 12 secondes
         local DISTANCE_IMPACT = 3.5
         
         local altCibleCroisiere = math.max(startY, cibleY) + ALTITUDE_OFFSET
         local phaseVol = "MONTEE"
+
+        local currentVecX, currentVecZ = 0.0, 0.0
 
         reglerPoussee(1.0)
 
@@ -141,7 +143,7 @@ while true do
 
                 -- 1. TRANSITION DE PHASE (MONTEE -> PIQUE)
                 if phaseVol == "MONTEE" then
-                    if cy >= altCibleCroisiere or dist2D < 10 then
+                    if cy >= altCibleCroisiere or dist2D < 15 then
                         phaseVol = "PIQUE"
                         statusActuel = "PIQUE"
                     end
@@ -162,7 +164,10 @@ while true do
                 local pitch, yaw = 0, 0
                 if gimbSensor and gimbSensor.getAngles then
                     local angles = gimbSensor.getAngles()
-                    if type(angles) == "table" then pitch, yaw = angles.pitch or 0, angles.yaw or 0 end
+                    if type(angles) == "table" then 
+                        pitch = angles.pitch or 0 
+                        yaw = angles.yaw or 0 
+                    end
                 end
 
                 modem.transmit(CANAL_TELEMETRIE, CANAL_TIR, textutils.serialize({
@@ -182,20 +187,39 @@ while true do
                     break
                 end
 
-                -- 5. GUIDAGE PROPORTIONNEL SIMPLE (SANS PID)
+                -- 5. GUIDAGE PD STABILISE
                 if phaseVol == "MONTEE" then
-                    reglerVecteur(0.0, 0.0)
+                    currentVecX = currentVecX * 0.8
+                    currentVecZ = currentVecZ * 0.8
+                    reglerVecteur(currentVecX, currentVecZ)
                     reglerPoussee(1.0)
                 else
-                    local corrX, corrZ = dx - (vx * 0.4), dz - (vz * 0.4)
-                    local corrDist2D = math.sqrt(corrX * corrX + corrZ * corrZ)
+                    -- Phase PIQUE / CIBLAGE :
+                    local corrX = dx - (vx * 0.6)
+                    local corrZ = dz - (vz * 0.6)
 
-                    if corrDist2D > 0.1 then
-                        reglerVecteur(
-                            math.max(-1.0, math.min(1.0, corrX / corrDist2D)),
-                            math.max(-1.0, math.min(1.0, corrZ / corrDist2D))
-                        )
+                    -- Conversion Monde -> Repère Local du missile (Lacet/Yaw)
+                    local localCorrX, localCorrZ = corrX, corrZ
+                    if yaw ~= 0 then
+                        local radYaw = math.rad(-yaw)
+                        localCorrX = corrX * math.cos(radYaw) - corrZ * math.sin(radYaw)
+                        localCorrZ = corrX * math.sin(radYaw) + corrZ * math.cos(radYaw)
                     end
+
+                    -- Gain P = 0.03
+                    local targetVecX = localCorrX * 0.03
+                    local targetVecZ = localCorrZ * 0.03
+
+                    -- Saturation (Clamping) à 30% max
+                    local MAX_BRAQUAGE = 0.3
+                    targetVecX = math.max(-MAX_BRAQUAGE, math.min(MAX_BRAQUAGE, targetVecX))
+                    targetVecZ = math.max(-MAX_BRAQUAGE, math.min(MAX_BRAQUAGE, targetVecZ))
+
+                    -- Filtre passe-bas (Lissage)
+                    currentVecX = currentVecX + (targetVecX - currentVecX) * 0.25
+                    currentVecZ = currentVecZ + (targetVecZ - currentVecZ) * 0.25
+
+                    reglerVecteur(currentVecX, currentVecZ)
                     reglerPoussee(1.0)
                 end
             end
