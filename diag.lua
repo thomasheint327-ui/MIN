@@ -1,13 +1,12 @@
 -- ===================================================
 -- SCRIPT DE DIAGNOSTIC DE VOL & BOÎTE NOIRE COMPLÈTE
--- Fichier : diag.lua
--- Enregistre TOUS les capteurs pendant le vol
+-- Fichier : diag.lua (Corrigé & Calibré)
 -- ===================================================
 
-local modem = peripheral.find("modem", function(_, o) return o.isWireless() end)
-local thruster = peripheral.find("creative_vector_thruster")
-              or peripheral.find("vector_thruster")
-              or peripheral.find("thruster")
+local modem     = peripheral.find("modem", function(_, o) return o.isWireless() end)
+local thruster  = peripheral.find("creative_vector_thruster")
+               or peripheral.find("vector_thruster")
+               or peripheral.find("thruster")
 
 local altSensor  = peripheral.find("altitude_sensor")
 local velSensor  = peripheral.find("velocity_sensor")
@@ -19,6 +18,14 @@ end
 
 local CANAL_TIR = 1337
 modem.open(CANAL_TIR)
+
+-- ===================================================
+-- PARAMÈTRES DE CALIBRATION DU GUIDAGE (À AJUSTER)
+-- ===================================================
+local GAIN_ANTICIPATION = 0.6  -- Secondes d'avance pour prédire la position future
+local GAIN_CORRECTION   = 0.03 -- Force de braquage (plus haut = plus agressif)
+local MAX_VECTOR_ANGLE  = 0.3  -- Inclinaison max de la tuyère (-0.3 à +0.3)
+local ALTITUDE_OFFSET   = 35   -- Altitude de croisière au-dessus du point de départ
 
 local function reglerPoussee(valeur)
     if thruster.setPowerNormalized then thruster.setPowerNormalized(valeur)
@@ -62,7 +69,6 @@ print("En attente d'un ordre de tir sur canal " .. CANAL_TIR .. "...")
 print("Le vol sera enregistre dans 'blackbox.txt'.")
 
 local cibleX, cibleY, cibleZ
-local ALTITUDE_OFFSET = 35
 
 while true do
     local _, _, chan, _, message = os.pullEvent("modem_message")
@@ -70,7 +76,7 @@ while true do
         local data = textutils.unserialize(message)
         if data and data.action == "LANCEMENT" then
             cibleX, cibleY, cibleZ = data.x, data.y, data.z
-            ALTITUDE_OFFSET = data.altOffset or 35
+            ALTITUDE_OFFSET = data.altOffset or ALTITUDE_OFFSET
             term.setTextColor(colors.lime)
             print(string.format("\n[+] Cible recue : X:%.1f Y:%.1f Z:%.1f", cibleX, cibleY, cibleZ))
             break
@@ -84,8 +90,8 @@ if not file then
     error("[-] Impossible de creer blackbox.txt")
 end
 
--- En-tête CSV avec TOUTES les métriques de TOUS les capteurs
-file.writeLine("TEMPS,GPS_X,GPS_Y,GPS_Z,ALT_SENSOR,CAPTEUR_VX,CAPTEUR_VY,CAPTEUR_VZ,CALCUL_VX,CALCUL_VZ,PITCH,YAW,ROLL,TARGET_X,TARGET_Z,PHASE")
+-- En-tête CSV
+file.writeLine("TEMPS,GPS_X,GPS_Y,GPS_Z,ALT_SENSOR,CAPTEUR_VX,CAPTEUR_VY,CAPTEUR_VZ,CALCUL_VX,CALCUL_VZ,PITCH,YAW,ROLL,VEC_X,VEC_Z,PHASE")
 
 term.setTextColor(colors.red)
 print("\n=== DECOLLAGE & ENREGISTREMENT DE VOL EN COURS ===")
@@ -118,18 +124,16 @@ while true do
         if a then altVal = tostring(a) end
     end
 
-    -- 3. Lecture Capteur Vitesse Physique
+    -- 3. Lecture Capteur Vitesse Physique (CORRIGÉ : lecture directe du tuple)
     local captVx, captVy, captVz = 0, 0, 0
     if velSensor and velSensor.getVelocity then
-        local v = velSensor.getVelocity()
-        if type(v) == "table" then
-            captVx = v.x or 0
-            captVy = v.y or 0
-            captVz = v.z or 0
-        end
+        local x, y, z = velSensor.getVelocity()
+        captVx = x or 0
+        captVy = y or 0
+        captVz = z or 0
     end
 
-    -- 4. Calcul de la Vitesse GPS (dérivée mathématique)
+    -- 4. Calcul de la Vitesse GPS (dérivée)
     local dt = math.max(0.05, tempsEcoule - lastTime)
     local calcVx, calcVz = 0, 0
     if cx and lastX then
@@ -139,12 +143,14 @@ while true do
 
     -- 5. Lecture Gimbal Sensor (Orientation)
     local pitch, yaw, roll = 0, 0, 0
-    if gimbSensor and gimbSensor.getAngles then
-        local angles = gimbSensor.getAngles()
-        if type(angles) == "table" then
-            pitch = angles.pitch or 0
-            yaw = angles.yaw or 0
-            roll = angles.roll or 0
+    if gimbSensor then
+        if gimbSensor.getAngles then
+            local res1, res2, res3 = gimbSensor.getAngles()
+            if type(res1) == "table" then
+                pitch, yaw, roll = res1.pitch or 0, res1.yaw or 0, res1.roll or 0
+            else
+                pitch, yaw, roll = res1 or 0, res2 or 0, res3 or 0
+            end
         end
     end
 
@@ -154,14 +160,14 @@ while true do
     end
     lastTime = tempsEcoule
 
-    -- Arrêt ou Fin de vol
+    -- Arrêt du vol
     if phaseVol == "ARRET" then
         couperPropulsion()
         print("\n[!] Temps de vol coule. Propulsion coupee.")
         break
     end
 
-    -- Guidage
+    -- GUIDAGE PARABOLIQUE & ANTICIPATION
     if cx and cy and cz then
         local dx, dy, dz = cibleX - cx, cibleY - cy, cibleZ - cz
         local dist2D = math.sqrt(dx * dx + dz * dz)
@@ -171,26 +177,28 @@ while true do
         end
 
         if phaseVol == "PIQUE" then
-            -- Utilisation de la vitesse capteur si présente, sinon vitesse calculée GPS
+            -- On utilise en priorité la vitesse réelle du capteur, sinon celle du GPS
             local vxActuelle = (captVx ~= 0) and captVx or calcVx
             local vzActuelle = (captVz ~= 0) and captVz or calcVz
 
-            local corrX = dx - (vxActuelle * 0.6)
-            local corrZ = dz - (vzActuelle * 0.6)
+            -- Anticipation de la trajectoire
+            local corrX = dx - (vxActuelle * GAIN_ANTICIPATION)
+            local corrZ = dz - (vzActuelle * GAIN_ANTICIPATION)
 
+            -- Conversion repère Monde -> repère local du missile via Gimbal Yaw
             local radYaw = math.rad(yaw)
             local localCorrX = corrX * math.cos(radYaw) - corrZ * math.sin(radYaw)
             local localCorrZ = corrX * math.sin(radYaw) + corrZ * math.cos(radYaw)
 
-            currentVecX = math.max(-0.3, math.min(0.3, localCorrX * 0.03))
-            currentVecZ = math.max(-0.3, math.min(0.3, localCorrZ * 0.03))
+            currentVecX = math.max(-MAX_VECTOR_ANGLE, math.min(MAX_VECTOR_ANGLE, localCorrX * GAIN_CORRECTION))
+            currentVecZ = math.max(-MAX_VECTOR_ANGLE, math.min(MAX_VECTOR_ANGLE, localCorrZ * GAIN_CORRECTION))
         end
     end
 
     reglerVecteur(currentVecX, currentVecZ)
     reglerPoussee(1.0)
 
-    -- 6. Enregistrement dans blackbox.txt
+    -- 6. Écriture dans la boîte noire (CSV)
     file.writeLine(string.format(
         "%.2f,%.2f,%.2f,%.2f,%s,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%s",
         tempsEcoule,
@@ -212,4 +220,3 @@ file.close()
 term.setTextColor(colors.lime)
 print("\n[+] Enregistrement termine !")
 print("Fichier 'blackbox.txt' genere.")
-print("Transmets-le via : pastebin put blackbox.txt")
