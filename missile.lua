@@ -1,70 +1,40 @@
 -- ===================================================================
--- MISSILE.LUA - SYSTEME COMPLET (Guidage + Blackbox + Debug) - 20 Hz
--- Fusion de diag.lua + testvol.lua en un seul fichier autonome
--- ===================================================================
---
--- SOMMAIRE
---   1. CONFIG              - tous les reglages a un seul endroit
---   2. PERIPHERIQUES        - detection modem/thruster/capteurs
---   3. PID                  - regulateur pour phases CLIMB/CRUISE/TERMINAL
---   4. ESTIMATEUR VITESSE   - delta GPS (le velSensor est peu fiable)
---   5. BLACKBOX              - log texte + export CSV
---   6. GUIDAGE PIQUE         - calcul de commande phase finale
---   7. MODE CALIBRATION      - test au sol du sens yaw/vecteur AVANT de tirer
---   8. MODE DEBUG LIVE       - affichage terminal detaille pendant le vol
---   9. BOUCLE PRINCIPALE     - menu + execution
---
+-- MISSILE.LUA - GUIDAGE ARC PRECALCULE (CLOSE RANGE) - 20 Hz
 -- ===================================================================
 
 -- ===================================================================
 -- 1. CONFIGURATION
 -- ===================================================================
 local CONFIG = {
-    -- Canaux radio
     CANAL_TIR         = 1337,
     CANAL_TELEMETRIE  = 1338,
-
-    -- Sortie redstone pour la detonation
     FACE_EXPLOSIF     = "top",
+    MAX_TEMPS_VOL     = 15,
+    DISTANCE_IMPACT   = 3.5,
 
-    -- Duree max de vol avant auto-destruction/arret (secondes)
-    MAX_TEMPS_VOL     = 12,
-
-    -- Inversion des axes si le missile part a l'oppose de la cible
-    -- (a determiner avec le MODE CALIBRATION, voir section 7)
     INVERSER_X        = false,
     INVERSER_Z        = false,
 
-    -- Distance (m) sous laquelle on considere l'impact
-    DISTANCE_IMPACT   = 3.5,
+    -- --- NOUVELLE PHILOSOPHIE : ARC PRECALCULE ---
 
-    -- --- Phase MONTEE ---
-    -- Amortissement du vecteur de poussee en montee (0 = coupe net, proche de 1 = garde l'elan)
-    MONTEE_DECAY      = 0.8,
+    -- Hauteur maximale de l'arc (en blocs) au-dessus de la cible ou du lanceur
+    HAUTEUR_ARC       = 25,
 
-    -- --- Phase PIQUE (attaque terminale) ---
-    PIQUE_GAIN_P      = 0.008,  -- gain proportionnel (reduit vs version d'origine 0.03, qui saturait)
-    PIQUE_DAMPING_V   = 0.6,    -- coefficient d'amortissement sur la vitesse estimee
-    PIQUE_MAX_BRAQ    = 0.3,    -- braquage max du vecteur de poussee (0-1)
-    PIQUE_LISSAGE     = 0.15,   -- filtre passe-bas sur la commande (plus bas = plus lisse)
-    DIST_TRANSITION_PIQUE = 15, -- distance horizontale (m) sous laquelle on bascule en PIQUE
+    -- Force de l'inclinaison vers l'avant (0.1 = lent, 0.4 = tres rapide/agressif)
+    VITESSE_AVANCE    = 0.3,
 
-    -- IMPORTANT : la plupart des vector thrusters (Create, VS-like) attendent
-    -- un vecteur ABSOLU (repere monde), pas relatif a l'orientation du missile.
-    -- Si USE_YAW_ROTATION=true alors que ton thruster est deja en repere monde,
-    -- tu obtiens une boucle de retroaction yaw->poussee->yaw qui produit des
-    -- trajectoires en boucle/spirale, INDEPENDAMMENT du gain choisi.
-    -- Laisse a false par defaut. Ne passe a true que si le test de
-    -- CALIBRATION (menu 3) prouve que ton thruster a besoin d'un repere local.
-    USE_YAW_ROTATION  = false,
+    -- Puissance de base pour compenser la gravite (a ajuster selon ton mod. Souvent 0.3 a 0.5)
+    COMPENSATION_GRAV = 0.4,
 
-    -- --- PID (reserve pour extension CLIMB/CRUISE/TERMINAL avance) ---
-    PID_PITCH = { Kp = 0.9, Ki = 0.002, Kd = 0.35, max_out = 1.0 },
-    PID_YAW   = { Kp = 0.9, Ki = 0.002, Kd = 0.35, max_out = 1.0 },
+    -- Agressivite avec laquelle le missile corrige son altitude pour coller a l'arc
+    GAIN_ALTITUDE     = 0.05,
+
+    -- Si true, coupe totalement les moteurs a X metres de la cible pour tomber comme une bombe
+    PLONGEON_KINETIC  = true,
+    DIST_PLONGEON     = 8,
 
     -- Debug
-    DEBUG_LIVE_TERMINAL = true,  -- affiche les valeurs cles a chaque tick dans le terminal
-    DEBUG_LOG_EVERY_N   = 3,     -- n'affiche qu'un tick sur N pour ne pas saturer l'ecran
+    DEBUG_LIVE        = true,
 }
 
 -- ===================================================================
@@ -75,10 +45,6 @@ local thruster = peripheral.find("creative_vector_thruster")
               or peripheral.find("vector_thruster")
               or peripheral.find("thruster")
 
-local altSensor  = peripheral.find("altitude_sensor")
-local velSensor  = peripheral.find("velocity_sensor")
-local gimbSensor = peripheral.find("gimbal_sensor")
-
 if not modem or not thruster then
     error("[-] Composants critiques introuvables (Modem/Thruster)")
 end
@@ -86,6 +52,7 @@ end
 modem.open(CONFIG.CANAL_TIR)
 
 local function reglerPoussee(valeur)
+    valeur = math.max(0.0, math.min(1.0, valeur)) -- Clamp entre 0 et 1
     if thruster.setPowerNormalized then thruster.setPowerNormalized(valeur)
     elseif thruster.setThrustNormalized then thruster.setThrustNormalized(valeur) end
 end
@@ -110,394 +77,34 @@ local function couperPropulsion()
 end
 
 -- ===================================================================
--- 3. PID (disponible pour qui veut affiner CLIMB/CRUISE/TERMINAL)
--- ===================================================================
-local function createPID(params)
-    return {
-        Kp = params.Kp, Ki = params.Ki, Kd = params.Kd, max_out = params.max_out,
-        integral = 0, prev_error = 0,
-
-        update = function(self, error, dt)
-            if dt <= 0 then return 0 end
-            local p = self.Kp * error
-            self.integral = self.integral + error * dt
-            if self.integral > 2.0 then self.integral = 2.0 end
-            if self.integral < -2.0 then self.integral = -2.0 end
-            local i = self.Ki * self.integral
-            local d = self.Kd * (error - self.prev_error) / dt
-            self.prev_error = error
-            local output = p + i + d
-            if output > self.max_out then output = self.max_out end
-            if output < -self.max_out then output = -self.max_out end
-            return output
-        end,
-
-        reset = function(self)
-            self.integral = 0
-            self.prev_error = 0
-        end
-    }
-end
-
--- ===================================================================
--- 4. ESTIMATEUR DE VITESSE PAR DELTA GPS
---    (le velSensor renvoyait 0.00 en permanence dans les logs de vol
---    precedents -> on ne peut pas s'y fier pour l'amortissement)
--- ===================================================================
-local function createVelocityEstimator()
-    return {
-        lastX = nil, lastY = nil, lastZ = nil, lastT = nil,
-
-        update = function(self, x, y, z, t)
-            local vx, vy, vz = 0, 0, 0
-            if self.lastT and t > self.lastT then
-                local dt = t - self.lastT
-                vx = (x - self.lastX) / dt
-                vy = (y - self.lastY) / dt
-                vz = (z - self.lastZ) / dt
-            end
-            self.lastX, self.lastY, self.lastZ, self.lastT = x, y, z, t
-            return vx, vy, vz
-        end
-    }
-end
-
--- ===================================================================
--- 5. BLACKBOX (log texte + export CSV)
--- ===================================================================
-local Blackbox = {
-    records = {},      -- lignes texte lisibles (print/dump)
-    csvRows  = {},      -- lignes structurees pour export CSV
-    max_records = 2000,
-
-    log = function(self, t, phase, pos, vel, gimbal, cmdX, cmdZ, extra)
-        extra = extra or {}
-        local line = string.format(
-            "T:%06.2f | PH:%-8s | POS:[%7.2f,%6.2f,%7.2f] | VEL:[%6.2f,%6.2f,%6.2f] | GIMB:[P:%+05.1f,Y:%+05.1f] | CMD:[X:%+05.3f,Z:%+05.3f] | DIST:%6.1f",
-            t, phase,
-            pos.x or 0, pos.y or 0, pos.z or 0,
-            vel.vx or 0, vel.vy or 0, vel.vz or 0,
-            gimbal.pitch or 0, gimbal.yaw or 0,
-            cmdX or 0, cmdZ or 0,
-            extra.dist or 0
-        )
-        table.insert(self.records, line)
-        if #self.records > self.max_records then table.remove(self.records, 1) end
-
-        table.insert(self.csvRows, {
-            t, phase,
-            pos.x or 0, pos.y or 0, pos.z or 0,
-            vel.vx or 0, vel.vy or 0, vel.vz or 0,
-            gimbal.pitch or 0, gimbal.yaw or 0,
-            cmdX or 0, cmdZ or 0,
-            extra.dist or 0
-        })
-        if #self.csvRows > self.max_records then table.remove(self.csvRows, 1) end
-    end,
-
-    dump = function(self)
-        print("==================== EXPORT BLACKBOX ====================")
-        for _, line in ipairs(self.records) do print(line) end
-        print("=========================================================")
-    end,
-
-    dumpCSV = function(self, path)
-        local f = fs.open(path, "w")
-        if not f then return false end
-        f.writeLine("temps,phase,pos_x,pos_y,pos_z,vx,vy,vz,pitch,yaw,cmd_x,cmd_z,dist")
-        for _, row in ipairs(self.csvRows) do
-            f.writeLine(table.concat(row, ","))
-        end
-        f.close()
-        return true
-    end,
-
-    reset = function(self)
-        self.records = {}
-        self.csvRows = {}
-    end
-}
-
--- ===================================================================
--- 6. GUIDAGE PIQUE (phase d'attaque terminale)
--- ===================================================================
-local function calculerCommandePique(dx, dz, vx, vz, yaw, currentVecX, currentVecZ)
-    local corrX = dx - (vx * CONFIG.PIQUE_DAMPING_V)
-    local corrZ = dz - (vz * CONFIG.PIQUE_DAMPING_V)
-
-    -- Repere local (body frame) seulement si explicitement active en CONFIG.
-    -- Sinon on envoie directement le vecteur monde au thruster (cas le plus
-    -- courant) : c'est ce qui evite la boucle de retroaction yaw<->poussee.
-    local corrFinalX, corrFinalZ = corrX, corrZ
-    if CONFIG.USE_YAW_ROTATION then
-        local radYaw = math.rad(yaw)
-        corrFinalX = corrX * math.cos(radYaw) - corrZ * math.sin(radYaw)
-        corrFinalZ = corrX * math.sin(radYaw) + corrZ * math.cos(radYaw)
-    end
-
-    local targetVecX = corrFinalX * CONFIG.PIQUE_GAIN_P
-    local targetVecZ = corrFinalZ * CONFIG.PIQUE_GAIN_P
-
-    targetVecX = math.max(-CONFIG.PIQUE_MAX_BRAQ, math.min(CONFIG.PIQUE_MAX_BRAQ, targetVecX))
-    targetVecZ = math.max(-CONFIG.PIQUE_MAX_BRAQ, math.min(CONFIG.PIQUE_MAX_BRAQ, targetVecZ))
-
-    local newVecX = currentVecX + (targetVecX - currentVecX) * CONFIG.PIQUE_LISSAGE
-    local newVecZ = currentVecZ + (targetVecZ - currentVecZ) * CONFIG.PIQUE_LISSAGE
-
-    return newVecX, newVecZ, targetVecX, targetVecZ
-end
-
--- ===================================================================
--- 7. MODE CALIBRATION (A FAIRE AU SOL AVANT TOUT VOL REEL)
---    Verifie que le sens de INVERSER_X / INVERSER_Z et la convention
---    de rotation yaw correspondent bien a ta config de thruster.
--- ===================================================================
-local function modeCalibration()
-    term.clear()
-    term.setCursorPos(1, 1)
-    term.setTextColor(colors.cyan)
-    print("=== MODE CALIBRATION (missile immobilise / cale) ===")
-    term.setTextColor(colors.white)
-    print("Objectif : verifier le sens reel du vecteur de poussee")
-    print("avant de faire confiance au guidage automatique.\n")
-    print("Commandes :")
-    print("  x : pousser +X pendant 1s (doit deriver vers +X monde)")
-    print("  z : pousser +Z pendant 1s")
-    print("  y : lire l'angle yaw actuel du gimbal")
-    print("  q : quitter le mode calibration\n")
-
-    while true do
-        write("> ")
-        local input = read()
-        if input == "x" then
-            print("[+] Poussee +X (0.2) pendant 1s...")
-            reglerVecteur(0.2, 0.0)
-            sleep(1)
-            reglerVecteur(0.0, 0.0)
-            print("    Verifie dans quel sens le missile a derive (log GPS/creative dashboard).")
-            print("    Si c'est -X au lieu de +X, mets INVERSER_X = true dans CONFIG.")
-        elseif input == "z" then
-            print("[+] Poussee +Z (0.2) pendant 1s...")
-            reglerVecteur(0.0, 0.2)
-            sleep(1)
-            reglerVecteur(0.0, 0.0)
-            print("    Meme verification pour Z -> INVERSER_Z si besoin.")
-        elseif input == "y" then
-            if gimbSensor and gimbSensor.getAngles then
-                local a = gimbSensor.getAngles()
-                print(string.format("    Pitch=%.1f  Yaw=%.1f", a.pitch or 0, a.yaw or 0))
-            else
-                print("    [!] gimbSensor indisponible.")
-            end
-        elseif input == "q" then
-            break
-        else
-            print("Commande inconnue.")
-        end
-    end
-end
-
--- ===================================================================
--- 8. AFFICHAGE DEBUG LIVE (pendant le vol, dans le terminal du missile)
--- ===================================================================
-local tickCounter = 0
-local function afficherDebugLive(t, phase, cx, cy, cz, dist, vx, vz, yaw, cmdX, cmdZ, targetX, targetZ)
-    if not CONFIG.DEBUG_LIVE_TERMINAL then return end
-    tickCounter = tickCounter + 1
-    if tickCounter % CONFIG.DEBUG_LOG_EVERY_N ~= 0 then return end
-
-    term.setCursorPos(1, 10)
-    term.clearLine()
-    term.setTextColor(colors.white)
-    print(string.format("T:%5.2fs  PH:%-7s  DIST:%6.1fm", t, phase, dist))
-
-    term.clearLine()
-    print(string.format("POS  X:%8.2f Y:%7.2f Z:%8.2f", cx, cy, cz))
-
-    term.clearLine()
-    print(string.format("VEL  Vx:%6.2f Vz:%6.2f  YAW:%6.1f", vx, vz, yaw))
-
-    term.clearLine()
-    term.setTextColor(colors.yellow)
-    print(string.format("CMD  X:%+5.3f Z:%+5.3f  (avant lissage X:%+5.3f Z:%+5.3f)", cmdX, cmdZ, targetX or 0, targetZ or 0))
-
-    -- Alerte visuelle si on est en saturation quasi permanente -> signe de gain trop fort
-    if math.abs(cmdX) >= CONFIG.PIQUE_MAX_BRAQ - 0.01 or math.abs(cmdZ) >= CONFIG.PIQUE_MAX_BRAQ - 0.01 then
-        term.setTextColor(colors.red)
-        term.clearLine()
-        print("[!] SATURATION - reduire PIQUE_GAIN_P si ca persiste plusieurs secondes")
-    end
-    term.setTextColor(colors.white)
-end
-
--- ===================================================================
--- 8.5 UPLOAD AUTOMATIQUE DU LOG VERS GITHUB (optionnel)
---     Necessite un fichier "token.txt" a la racine de l'ordinateur
---     CONTENANT UNIQUEMENT le Personal Access Token GitHub, sur une
---     seule ligne. Ce fichier ne doit JAMAIS etre pousse sur git.
--- ===================================================================
-local GITHUB_CONFIG = {
-    ENABLED    = false,   -- passe a true pour activer l'upload auto
-    OWNER      = "thomasheint327-ui",
-    REPO       = "<TON-REPO>",     -- a remplacer
-    BRANCH     = "main",           -- ou "master"
-    DOSSIER    = "logs",           -- dossier cible dans le repo (cree si absent)
-    TOKEN_FILE = "token.txt",
-}
-
--- Encodeur Base64 minimal (CC:Tweaked n'en fournit pas nativement)
-local function base64Encode(data)
-    local b = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-    return ((data:gsub('.', function(x)
-        local r, byte = "", x:byte()
-        for i = 8, 1, -1 do r = r .. (byte % 2^i - byte % 2^(i-1) > 0 and "1" or "0") end
-        return r
-    end) .. "0000"):gsub("%d%d%d?%d?%d?%d?", function(x)
-        if (#x < 6) then return "" end
-        local c = 0
-        for i = 1, 6 do c = c + (x:sub(i,i) == "1" and 2^(6-i) or 0) end
-        return b:sub(c+1, c+1)
-    end) .. ({ "", "==", "=" })[#data % 3 + 1])
-end
-
-local function lireToken()
-    if not fs.exists(GITHUB_CONFIG.TOKEN_FILE) then
-        return nil, "Fichier " .. GITHUB_CONFIG.TOKEN_FILE .. " introuvable"
-    end
-    local f = fs.open(GITHUB_CONFIG.TOKEN_FILE, "r")
-    local token = f.readLine()
-    f.close()
-    if not token or token == "" then
-        return nil, "Token vide dans " .. GITHUB_CONFIG.TOKEN_FILE
-    end
-    return token
-end
-
--- Pousse un fichier local vers le repo GitHub configure
-local function pousserLogGithub(cheminLocal, nomFichierDistant)
-    if not GITHUB_CONFIG.ENABLED then return false, "Upload GitHub desactive (GITHUB_CONFIG.ENABLED = false)" end
-
-    local token, err = lireToken()
-    if not token then return false, err end
-
-    if not fs.exists(cheminLocal) then
-        return false, "Fichier local introuvable : " .. cheminLocal
-    end
-
-    local f = fs.open(cheminLocal, "r")
-    local contenu = f.readAll()
-    f.close()
-
-    local cheminDistant = GITHUB_CONFIG.DOSSIER .. "/" .. nomFichierDistant
-    local url = string.format(
-        "https://api.github.com/repos/%s/%s/contents/%s",
-        GITHUB_CONFIG.OWNER, GITHUB_CONFIG.REPO, cheminDistant
-    )
-
-    local body = textutils.serialiseJSON({
-        message = "Upload auto log de vol : " .. nomFichierDistant,
-        content = base64Encode(contenu),
-        branch  = GITHUB_CONFIG.BRANCH,
-    })
-
-    local headers = {
-        ["Authorization"] = "token " .. token,
-        ["Content-Type"]  = "application/json",
-        ["Accept"]        = "application/vnd.github+json",
-        ["User-Agent"]    = "computercraft-missile-logger",
-    }
-
-    local ok, response = pcall(function()
-        return http.request({ url = url, body = body, headers = headers, method = "PUT" })
-    end)
-
-    if not ok then
-        return false, "Erreur requete HTTP : " .. tostring(response)
-    end
-
-    -- http.request est asynchrone : on attend l'evenement de reponse
-    while true do
-        local event, url2, handle = os.pullEvent()
-        if event == "http_success" and url2 == url then
-            handle.close()
-            return true
-        elseif event == "http_failure" and url2 == url then
-            local msg = handle and handle.readAll and handle.readAll() or "raison inconnue"
-            return false, "Echec upload GitHub : " .. tostring(msg)
-        end
-    end
-end
-
--- ===================================================================
--- 9. BOUCLE PRINCIPALE
+-- 3. BOUCLE PRINCIPALE
 -- ===================================================================
 term.clear()
 term.setCursorPos(1, 1)
 term.setTextColor(colors.orange)
-print("=== SYSTEME MISSILE UNIFIE ===")
+print("=== MISSILE CLOSE-RANGE (ARC) ===")
 term.setTextColor(colors.white)
-print("1. Mode RUN (Lancement Auto dans 3s)")
-print("2. Mode MAINTENANCE (Console Shell)")
-print("3. Mode CALIBRATION (test vecteurs au sol)")
 
-local timerId = os.startTimer(3)
-local choix = nil
-
-while true do
-    local event, p1 = os.pullEvent()
-    if event == "timer" and p1 == timerId then
-        choix = "RUN"
-        break
-    elseif event == "char" then
-        if p1 == "2" then choix = "MAINTENANCE" end
-        if p1 == "3" then choix = "CALIBRATION" end
-        if choix then break end
-        if p1 ~= "1" then
-            -- touche non geree, on ignore et on continue d'attendre
-        else
-            choix = "RUN"
-            break
-        end
-    end
-end
-
-if choix == "MAINTENANCE" then
-    term.setTextColor(colors.yellow)
-    print("\n[!] Passage en Mode MAINTENANCE. Console active.")
-    return
-elseif choix == "CALIBRATION" then
-    modeCalibration()
-    print("\n[+] Calibration terminee. Redemarre le script pour lancer un vol.")
-    return
-end
-
--- --- MODE RUN ---
 while true do
     couperPropulsion()
-    term.clear()
-    term.setCursorPos(1, 1)
     term.setTextColor(colors.lime)
-    print("=== MISSILE READY ===")
-    term.setTextColor(colors.white)
-    print("Capteurs : Alt=" .. (altSensor and "OK" or "NOK") ..
-          " | Vit=" .. (velSensor and "OK" or "NOK") ..
-          " | Gimbal=" .. (gimbSensor and "OK" or "NOK"))
-    print("Inversion axes : X=" .. tostring(CONFIG.INVERSER_X) .. " Z=" .. tostring(CONFIG.INVERSER_Z))
+    print("\n=== SYSTEME PRET ===")
     term.setTextColor(colors.yellow)
-    print("\nEn attente d'un ordre de tir sur CH " .. CONFIG.CANAL_TIR .. "...")
+    print("En attente d'un ordre de tir sur CH " .. CONFIG.CANAL_TIR .. "...")
 
     local cibleX, cibleY, cibleZ
-    local ALTITUDE_OFFSET = 35
 
+    -- Attente ordre de tir
     while true do
         local _, _, chan, _, message = os.pullEvent("modem_message")
         if chan == CONFIG.CANAL_TIR then
             local data = textutils.unserialize(message)
             if data and data.action == "LANCEMENT" then
                 cibleX, cibleY, cibleZ = data.x, data.y, data.z
-                ALTITUDE_OFFSET = data.altOffset or 35
+                -- Si l'utilisateur donne un altOffset, on l'utilise pour la hauteur de l'arc
+                if data.altOffset then CONFIG.HAUTEUR_ARC = data.altOffset end
                 term.setTextColor(colors.green)
-                print(string.format("\n[+] Ordre recu ! Cible: X:%.1f Y:%.1f Z:%.1f | Survol: +%dm", cibleX, cibleY, cibleZ, ALTITUDE_OFFSET))
+                print(string.format("[+] Ordre recu ! Cible: [%.1f, %.1f, %.1f]", cibleX, cibleY, cibleZ))
                 break
             end
         end
@@ -506,123 +113,97 @@ while true do
     local startX, startY, startZ = gps.locate(2)
     if startX then
         term.setTextColor(colors.red)
-        print("=== VOL ACTIF ===")
+        print("=== DECOLLAGE ===")
 
-        Blackbox:reset()
         local startTime = os.clock()
-        local altCibleCroisiere = math.max(startY, cibleY) + ALTITUDE_OFFSET
-        local phaseVol = "MONTEE"
-        local currentVecX, currentVecZ = 0.0, 0.0
-        local velEstimator = createVelocityEstimator()
-        tickCounter = 0
 
-        reglerPoussee(1.0)
+        -- PRECALCUL DE LA TRAJECTOIRE
+        -- On calcule la distance horizontale totale à parcourir
+        local dx0 = cibleX - startX
+        local dz0 = cibleZ - startZ
+        local distInitiale = math.sqrt(dx0*dx0 + dz0*dz0)
+        distInitiale = math.max(1, distInitiale) -- evite div par 0
 
+        local tickCounter = 0
+
+        -- Boucle de vol
         while true do
-            local tempsEcoule = os.clock() - startTime
-            local statusActuel = phaseVol
-
-            if tempsEcoule >= CONFIG.MAX_TEMPS_VOL then
-                couperPropulsion()
-                statusActuel = "ARRET"
+            local t = os.clock() - startTime
+            if t >= CONFIG.MAX_TEMPS_VOL then
+                print("[!] TEMPS DE VOL ECOULE.")
+                break
             end
 
             local cx, cy, cz = gps.locate(0.05)
-            if altSensor and altSensor.getHeight then
-                local altExacte = altSensor.getHeight()
-                if altExacte then cy = altExacte end
-            end
-
             if cx then
-                local dx, dy, dz = cibleX - cx, cibleY - cy, cibleZ - cz
-                local dist = math.sqrt(dx * dx + dy * dy + dz * dz)
-                local dist2D = math.sqrt(dx * dx + dz * dz)
+                -- 1. Calcul de la progression (0.0 au depart, 1.0 a la cible)
+                local dx = cibleX - cx
+                local dz = cibleZ - cz
+                local distActuelle = math.sqrt(dx*dx + dz*dz)
 
-                local vx_est, vy_est, vz_est = velEstimator:update(cx, cy, cz, tempsEcoule)
+                local progression = 1.0 - (distActuelle / distInitiale)
+                progression = math.max(0.0, math.min(1.0, progression)) -- borne entre 0 et 1
 
-                if phaseVol == "MONTEE" then
-                    if cy >= altCibleCroisiere or dist2D < CONFIG.DIST_TRANSITION_PIQUE then
-                        phaseVol = "PIQUE"
-                        statusActuel = "PIQUE"
-                    end
-                end
-
-                if dist <= CONFIG.DISTANCE_IMPACT then
-                    statusActuel = "IMPACT"
-                end
-
-                local pitch, yaw = 0, 0
-                if gimbSensor and gimbSensor.getAngles then
-                    local angles = gimbSensor.getAngles()
-                    if type(angles) == "table" then
-                        pitch = angles.pitch or 0
-                        yaw = angles.yaw or 0
-                    end
-                end
-
-                modem.transmit(CONFIG.CANAL_TELEMETRIE, CONFIG.CANAL_TIR, textutils.serialize({
-                    x = cx, y = cy, z = cz, alt = cy,
-                    vit = math.sqrt(vx_est*vx_est + vz_est*vz_est), pitch = pitch, yaw = yaw,
-                    dist = dist, status = statusActuel
-                }))
-
-                if statusActuel == "ARRET" then
-                    print("[!] TEMPS DE VOL ECOULE.")
-                    break
-                elseif statusActuel == "IMPACT" then
+                -- 2. VERIFICATION IMPACT
+                if distActuelle <= CONFIG.DISTANCE_IMPACT or (progression > 0.95 and math.abs(cy - cibleY) < 3) then
                     couperPropulsion()
                     redstone.setOutput(CONFIG.FACE_EXPLOSIF, true)
-                    print("[+] DETONATION !")
+                    term.setTextColor(colors.red)
+                    print("\n[+] BOOM ! IMPACT CONFIRME.")
                     break
                 end
 
-                local targetX, targetZ = 0, 0
-                if phaseVol == "MONTEE" then
-                    currentVecX = currentVecX * CONFIG.MONTEE_DECAY
-                    currentVecZ = currentVecZ * CONFIG.MONTEE_DECAY
-                    reglerVecteur(currentVecX, currentVecZ)
-                    reglerPoussee(1.0)
-                else
-                    currentVecX, currentVecZ, targetX, targetZ = calculerCommandePique(
-                        dx, dz, vx_est, vz_est, yaw, currentVecX, currentVecZ
-                    )
-                    reglerVecteur(currentVecX, currentVecZ)
-                    reglerPoussee(1.0)
+                -- 3. CALCUL DE L'ALTITUDE PRECALCULEE (L'Arc)
+                -- Interpolation lineaire entre l'altitude de depart et d'arrivee
+                local baseAlt = startY + (cibleY - startY) * progression
+                -- Ajout de la courbe en cloche (sinus: 0 au depart, 1 a mi-chemin, 0 a l'arrivee)
+                local altIdeale = baseAlt + (CONFIG.HAUTEUR_ARC * math.sin(progression * math.pi))
+
+                -- 4. CORRECTION MOTEUR (Monter ou Descendre)
+                local erreurY = altIdeale - cy
+                local thrust = CONFIG.COMPENSATION_GRAV + (erreurY * CONFIG.GAIN_ALTITUDE)
+
+                -- 5. DIRECTION HORIZONTALE
+                local vecX = (dx / distActuelle) * CONFIG.VITESSE_AVANCE
+                local vecZ = (dz / distActuelle) * CONFIG.VITESSE_AVANCE
+
+                -- 6. PHASE TERMINALE (Plongeon final)
+                local status = "EN VOL"
+                if CONFIG.PLONGEON_KINETIC and distActuelle < CONFIG.DIST_PLONGEON then
+                    status = "PLONGEON!"
+                    thrust = 0.0 -- Coupe les gaz pour tomber net
+                    vecX = 0.0
+                    vecZ = 0.0
                 end
 
-                Blackbox:log(
-                    tempsEcoule, phaseVol,
-                    { x = cx, y = cy, z = cz },
-                    { vx = vx_est, vy = vy_est, vz = vz_est },
-                    { pitch = pitch, yaw = yaw },
-                    currentVecX, currentVecZ,
-                    { dist = dist }
-                )
+                -- Application
+                reglerVecteur(vecX, vecZ)
+                reglerPoussee(thrust)
 
-                afficherDebugLive(tempsEcoule, phaseVol, cx, cy, cz, dist, vx_est, vz_est, yaw, currentVecX, currentVecZ, targetX, targetZ)
+                -- Telemetrie & Affichage
+                tickCounter = tickCounter + 1
+                if tickCounter % 3 == 0 and CONFIG.DEBUG_LIVE then
+                    term.setCursorPos(1, 8)
+                    term.clearLine()
+                    term.setTextColor(colors.white)
+                    print(string.format("DIST: %5.1f m | PROG: %3.0f%% | %s", distActuelle, progression*100, status))
+
+                    term.clearLine()
+                    print(string.format("ALT Actuelle: %5.1f | ALT Prevue: %5.1f", cy, altIdeale))
+
+                    term.clearLine()
+                    term.setTextColor(colors.yellow)
+                    print(string.format("VECT: X%+.2f Z%+.2f | GAZ: %3.0f%%", vecX, vecZ, thrust*100))
+                end
             end
             sleep(0)
-        end
-
-        local csvName = "vol_" .. os.date("%Y%m%d_%H%M%S") .. ".csv"
-        if Blackbox:dumpCSV(csvName) then
-            print("[+] Log CSV sauvegarde localement : " .. csvName)
-
-            if GITHUB_CONFIG.ENABLED then
-                print("[*] Upload vers GitHub en cours...")
-                local okUp, errUp = pousserLogGithub(csvName, csvName)
-                if okUp then
-                    print("[+] Log pousse sur GitHub : " .. GITHUB_CONFIG.DOSSIER .. "/" .. csvName)
-                else
-                    print("[!] Upload GitHub echoue : " .. tostring(errUp))
-                end
-            end
         end
     else
         print("[-] PERTE GPS. Tir avorte.")
     end
 
     term.setTextColor(colors.gray)
-    print("\nReinitialisation du systeme dans 3 secondes...")
+    print("\nReinitialisation dans 3 secondes...")
     sleep(3)
+    term.clear()
 end
