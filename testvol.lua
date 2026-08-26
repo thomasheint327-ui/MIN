@@ -1,5 +1,5 @@
 -- ===================================================
--- LOGICIEL MISSILE - TOP-ATTACK STABILISE (20 Hz)
+-- LOGICIEL MISSILE - TOP-ATTACK CORRIGE (20 Hz)
 -- Fichier : testvol.lua
 -- ===================================================
 
@@ -16,9 +16,18 @@ if not modem or not thruster then
     error("[-] Composants critiques introuvables (Modem/Thruster)")
 end
 
+-- ===================================================
+-- REGLAGES & REPERES
+-- ===================================================
 local CANAL_TIR = 1337
 local CANAL_TELEMETRIE = 1338
 local FACE_EXPLOSIF = "top"
+local MAX_TEMPS_VOL = 12
+
+-- Modifie ces booléens si le missile tourne dans le sens opposé à la cible
+local INVERSER_X = false
+local INVERSER_Z = false
+
 modem.open(CANAL_TIR)
 
 local function reglerPoussee(valeur)
@@ -27,6 +36,9 @@ local function reglerPoussee(valeur)
 end
 
 local function reglerVecteur(vx, vz)
+    if INVERSER_X then vx = -vx end
+    if INVERSER_Z then vz = -vz end
+
     if thruster.setVector then thruster.setVector(vx, vz)
     else
         if thruster.setVectorX then thruster.setVectorX(vx) end
@@ -42,11 +54,11 @@ local function couperPropulsion()
     end
 end
 
--- --- MENU D'AMORCAGE (RUN / MAINTENANCE) ---
+-- --- MENU D'AMORCAGE ---
 term.clear()
 term.setCursorPos(1, 1)
 term.setTextColor(colors.orange)
-print("=== DEMARRAGE SYSTEME MISSILE (STABILISE) ===")
+print("=== DEMARRAGE SYSTEME MISSILE (CORRIGE) ===")
 term.setTextColor(colors.white)
 print("1. Mode RUN (Lancement Auto dans 3s)")
 print("2. Mode MAINTENANCE (Console Shell)")
@@ -78,7 +90,7 @@ while true do
     term.clear()
     term.setCursorPos(1, 1)
     term.setTextColor(colors.lime)
-    print("=== MISSILE READY (TOP-ATTACK STABILISE) ===")
+    print("=== MISSILE READY (CORRECTION YAW) ===")
     term.setTextColor(colors.white)
     print("Capteurs : Alt=" .. (altSensor and "OK" or "NOK") .. 
           " | Vit=" .. (velSensor and "OK" or "NOK") .. 
@@ -86,7 +98,6 @@ while true do
     term.setTextColor(colors.yellow)
     print("\nEn attente d'un ordre de tir sur CH " .. CANAL_TIR .. "...")
 
-    -- Attente de l'ordre de tir
     local cibleX, cibleY, cibleZ
     local ALTITUDE_OFFSET = 35
 
@@ -104,19 +115,15 @@ while true do
         end
     end
 
-    -- Accrochage GPS initial
     local startX, startY, startZ = gps.locate(2)
     if startX then
         term.setTextColor(colors.red)
-        print("=== VOL ACTIF : TOP-ATTACK STABILISE ===")
+        print("=== VOL ACTIF : GUIDAGE CORRIGE ===")
         
         local startTime = os.clock()
-        local MAX_TEMPS_VOL = 12 -- Remis à 12 secondes
         local DISTANCE_IMPACT = 3.5
-        
         local altCibleCroisiere = math.max(startY, cibleY) + ALTITUDE_OFFSET
         local phaseVol = "MONTEE"
-
         local currentVecX, currentVecZ = 0.0, 0.0
 
         reglerPoussee(1.0)
@@ -176,7 +183,7 @@ while true do
                     dist = dist, status = statusActuel
                 }))
 
-                -- 4. ARRET ET IMPACT
+                -- 4. ARRET ET DETONATION
                 if statusActuel == "ARRET" then
                     print("[!] TEMPS DE VOL ECOULE.")
                     break
@@ -187,30 +194,27 @@ while true do
                     break
                 end
 
-                -- 5. GUIDAGE PD STABILISE
+                -- 5. GUIDAGE PD STABILISE AVEC CORRECTION D'ANGLE YAW
                 if phaseVol == "MONTEE" then
                     currentVecX = currentVecX * 0.8
                     currentVecZ = currentVecZ * 0.8
                     reglerVecteur(currentVecX, currentVecZ)
                     reglerPoussee(1.0)
                 else
-                    -- Phase PIQUE / CIBLAGE :
+                    -- Phase PIQUE : Erreur amortie par la vitesse
                     local corrX = dx - (vx * 0.6)
                     local corrZ = dz - (vz * 0.6)
 
-                    -- Conversion Monde -> Repère Local du missile (Lacet/Yaw)
-                    local localCorrX, localCorrZ = corrX, corrZ
-                    if yaw ~= 0 then
-                        local radYaw = math.rad(-yaw)
-                        localCorrX = corrX * math.cos(radYaw) - corrZ * math.sin(radYaw)
-                        localCorrZ = corrX * math.sin(radYaw) + corrZ * math.cos(radYaw)
-                    end
+                    -- Repère local : alignement trigo avec le yaw Minecraft
+                    local radYaw = math.rad(yaw)
+                    local localCorrX = corrX * math.cos(radYaw) - corrZ * math.sin(radYaw)
+                    local localCorrZ = corrX * math.sin(radYaw) + corrZ * math.cos(radYaw)
 
                     -- Gain P = 0.03
                     local targetVecX = localCorrX * 0.03
                     local targetVecZ = localCorrZ * 0.03
 
-                    -- Saturation (Clamping) à 30% max
+                    -- Saturation à 30% max de braquage
                     local MAX_BRAQUAGE = 0.3
                     targetVecX = math.max(-MAX_BRAQUAGE, math.min(MAX_BRAQUAGE, targetVecX))
                     targetVecZ = math.max(-MAX_BRAQUAGE, math.min(MAX_BRAQUAGE, targetVecZ))
