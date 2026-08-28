@@ -2,37 +2,53 @@
 local TARGET_ALTITUDE_GAIN = 200  -- Altitude visée (+200 blocs)
 local LOG_FILE = "flight_log.json"
 
--- Gains PID
-local KP = 1.8         -- Force de correction
-local KD = 0.4         -- Amortissement
-local DEADBAND = 0.8   -- Zone morte en degrés
+-- GAINS PID OPTIMISÉS (Ultra-réactifs pour corriger immédiatement au sol)
+local KP = 3.5        -- Correction forte dès le moindre degré de dérive
+local KD = 0.8        -- Amortissement pour éviter le pompage au retour au centre
+local DEADBAND = 0.1  -- Réponse immédiate (déclenché dès 0.1° de pente)
 
--- INVERSION DES AXES (Bascule à true si l'aileron accentue la dérive)
-local INVERT_PITCH = true   -- Inversé pour corriger la dérive Pitch
-local INVERT_YAW   = true   -- Inversé pour corriger la dérive Yaw
+-- INVERSION DES AXES (Change à true/false selon le comportement au tir)
+local INVERT_PITCH = true
+local INVERT_YAW   = true
 
--- Noms des périphériques
-local thruster_name = "creative_vector_thruster_16"
-local alt_name      = "altitude_sensor_10"
-local gimbal_name   = "gimbal_sensor_15"
-local pitch_name    = "aileron_bearing_6"
-local yaw_name      = "aileron_bearing_7"
+-- Détection automatique par TYPE (évite les bugs d'IDs modifiés)
+local function find_peripheral(type_name)
+    for _, name in ipairs(peripheral.getNames()) do
+        if peripheral.getType(name) == type_name then
+            return peripheral.wrap(name), name
+        end
+    end
+    return nil, nil
+end
 
-local thruster      = peripheral.wrap(thruster_name)
-local alt_sensor    = peripheral.wrap(alt_name)
-local gimbal_sensor = peripheral.wrap(gimbal_name)
-local aileron_pitch = peripheral.wrap(pitch_name)
-local aileron_yaw   = peripheral.wrap(yaw_name)
+local thruster, thruster_name    = find_peripheral("creative_vector_thruster")
+local alt_sensor, alt_name       = find_peripheral("altitude_sensor")
+local gimbal_sensor, gimbal_name = find_peripheral("gimbal_sensor")
+
+-- Récupération dynamique des 2 ailerons
+local ailerons = {}
+for _, name in ipairs(peripheral.getNames()) do
+    if peripheral.getType(name) == "aileron_bearing" then
+        table.insert(ailerons, peripheral.wrap(name))
+    end
+end
+
+local aileron_pitch = ailerons[1]
+local aileron_yaw   = ailerons[2]
 
 if not thruster or not alt_sensor then
     error("Erreur: Propulseur ou Altimètre introuvable !")
 end
 
+if not aileron_pitch or not aileron_yaw then
+    error("Erreur: Les 2 ailerons ne sont pas tous les deux détectés !")
+end
+
 -- Re-wrap automatique en vol (sécurité VS2)
 local function update_peripherals()
-    if not aileron_pitch then aileron_pitch = peripheral.wrap(pitch_name) end
-    if not aileron_yaw then aileron_yaw = peripheral.wrap(yaw_name) end
-    if not gimbal_sensor then gimbal_sensor = peripheral.wrap(gimbal_name) end
+    if not aileron_pitch and ailerons[1] then aileron_pitch = ailerons[1] end
+    if not aileron_yaw and ailerons[2] then aileron_yaw = ailerons[2] end
+    if not gimbal_sensor then gimbal_sensor = find_peripheral("gimbal_sensor") end
 end
 
 local function get_current_altitude()
@@ -111,11 +127,11 @@ while running do
         -- Angles en Degrés
         local pitch, yaw, roll = get_orientation_degrees()
 
-        -- Calcul de l'erreur en tenant compte des inversions d'axes
+        -- Erreurs d'inclinaison avec prise en compte des inversions
         local pitch_err = INVERT_PITCH and pitch or -pitch
         local yaw_err   = INVERT_YAW and yaw or -yaw
 
-        -- Application de la zone morte
+        -- Zone morte fine (0.1°)
         if math.abs(pitch_err) < DEADBAND then pitch_err = 0 end
         if math.abs(yaw_err) < DEADBAND then yaw_err = 0 end
 
@@ -129,11 +145,11 @@ while running do
         local cmd_pitch = (pitch_err * KP) + (pitch_rate * KD)
         local cmd_yaw   = (yaw_err * KP)   + (yaw_rate * KD)
 
-        -- Application directe aux ailerons 6 et 7
+        -- Envoi aux ailerons
         set_aileron_angle(aileron_pitch, cmd_pitch)
         set_aileron_angle(aileron_yaw, cmd_yaw)
 
-        -- Sauvegarde télémétrique
+        -- Enregistrement de la télémétrie
         table.insert(flight_data.records, {
             tick = tick,
             time_s = (cur_time - launch_start_time) / 1000.0,
