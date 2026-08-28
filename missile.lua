@@ -2,10 +2,14 @@
 local TARGET_ALTITUDE_GAIN = 200  -- Altitude visée (+200 blocs)
 local LOG_FILE = "flight_log.json"
 
--- Gains PID (Réglés pour la plage -45° à +45°)
+-- Gains PID
 local KP = 1.8         -- Force de correction
 local KD = 0.4         -- Amortissement
-local DEADBAND = 0.8   -- Zone morte en degrés (ignore les dérives < 0.8°)
+local DEADBAND = 0.8   -- Zone morte en degrés
+
+-- INVERSION DES AXES (Bascule à true si l'aileron accentue la dérive)
+local INVERT_PITCH = true   -- Inversé pour corriger la dérive Pitch
+local INVERT_YAW   = true   -- Inversé pour corriger la dérive Yaw
 
 -- Noms des périphériques
 local thruster_name = "creative_vector_thruster_16"
@@ -56,7 +60,6 @@ end
 -- Commande de l'aileron (plage -45° à +45°)
 local function set_aileron_angle(bearing, angle)
     if bearing then
-        -- Sécurité de bornage strict à ±45°
         local clamped_angle = math.max(-45, math.min(45, angle))
         pcall(function()
             bearing.setHeadAngle("primary", clamped_angle)
@@ -108,11 +111,11 @@ while running do
         -- Angles en Degrés
         local pitch, yaw, roll = get_orientation_degrees()
 
-        -- Erreurs par rapport au vol vertical (0°)
-        local pitch_err = -pitch
-        local yaw_err   = -yaw
+        -- Calcul de l'erreur en tenant compte des inversions d'axes
+        local pitch_err = INVERT_PITCH and pitch or -pitch
+        local yaw_err   = INVERT_YAW and yaw or -yaw
 
-        -- Application de la zone morte (évite de faire trembler les ailerons)
+        -- Application de la zone morte
         if math.abs(pitch_err) < DEADBAND then pitch_err = 0 end
         if math.abs(yaw_err) < DEADBAND then yaw_err = 0 end
 
@@ -124,7 +127,7 @@ while running do
 
         -- Calcul des ordres d'angles
         local cmd_pitch = (pitch_err * KP) + (pitch_rate * KD)
-        local cmd_yaw = (yaw_err * KP) + (yaw_rate * KD)
+        local cmd_yaw   = (yaw_err * KP)   + (yaw_rate * KD)
 
         -- Application directe aux ailerons 6 et 7
         set_aileron_angle(aileron_pitch, cmd_pitch)
