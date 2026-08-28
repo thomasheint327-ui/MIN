@@ -38,9 +38,6 @@ print("----------------------------------------")
 
 -- Verrouillage des ailerons au neutre (0°) pour un tir parfaitement droit
 if aileron then
-    if aileron.isAssembled and not aileron.isAssembled() then
-        aileron.assemble()
-    end
     if aileron.setHeadAngle then
         aileron.setHeadAngle("primary", 0)
         aileron.setHeadAngle("secondary", 0)
