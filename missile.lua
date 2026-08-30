@@ -12,12 +12,12 @@ end
 local MAX_SPEED      = 128  -- Vitesse maximale atteinte (RPM)
 local TIME_ACCEL     = 10   -- Durée d'accélération (secondes)
 local TIME_DECEL     = 10   -- Durée de décélération (secondes)
-local TICK_INTERVAL  = 0.05 -- Fréquence de rafraîchissement (20Hz / 1 tick)
+local TICK_INTERVAL  = 0.05 -- Fréquence de rafraîchissement (20Hz)
 
 term.clear()
 term.setCursorPos(1, 1)
 print("========================================")
-print(" TEST MOTEUER : ACCEL / DECEL (20s)")
+print(" TEST MOTEUR : ACCEL / DECEL (20s)")
 print(" Moteur : " .. peripheral.getName(motor))
 print("========================================")
 
@@ -31,7 +31,7 @@ for i = 0, steps_accel do
     local progress = i / steps_accel
     local speed    = progress * MAX_SPEED
     
-    motor.setTargetSpeed(speed)
+    motor.setGeneratedSpeed(speed)
     
     term.setCursorPos(1, 7)
     term.clearLine()
@@ -50,7 +50,7 @@ for i = 0, steps_decel do
     local progress = i / steps_decel
     local speed    = MAX_SPEED * (1 - progress)
     
-    motor.setTargetSpeed(speed)
+    motor.setGeneratedSpeed(speed)
     
     term.setCursorPos(1, 11)
     term.clearLine()
@@ -60,7 +60,7 @@ for i = 0, steps_decel do
 end
 
 -- Sécurité finale
-motor.setTargetSpeed(0)
+motor.setGeneratedSpeed(0)
 
 term.setCursorPos(1, 13)
-print("\n[SUCCES] Test de 20s termine. Moteur isole a 0 RPM.")
+print("\n[SUCCES] Test de 20s termine. Moteur arrete a 0 RPM.")
