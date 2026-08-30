@@ -12,38 +12,50 @@ print("   CLONAGE D'ENSEMBLE DU DEPOT GITHUB   ")
 print("========================================")
 
 if not http then
-    error("Erreur : L'API HTTP est désactivée dans la config ComputerCraft !")
+    error("Erreur : L'API HTTP est desactivée dans la config ComputerCraft !")
 end
 
 write("Lecture de la structure de " .. REPO .. "...")
-local response = http.get(API_URL)
+
+-- GitHub API exige obligatoirement un User-Agent
+local headers = {
+    ["User-Agent"] = "ComputerCraft-GitSync"
+}
+
+local response = http.get(API_URL, headers)
 
 if not response then
-    error("\nImpossible d'accéder à l'API GitHub. Vérifie la connexion HTTP.")
+    error("\nImpossible d'acceder a l'API GitHub (Erreur 403 / En-tete User-Agent requis).")
 end
 
 local data = textutils.unserializeJSON(response.readAll())
 response.close()
 
 if not data or not data.tree then
-    error("\nFormat de réponse GitHub invalide.")
+    error("\nFormat de reponse GitHub invalide.")
 end
 
 print(" [OK]")
 
--- Téléchargement de l'intégralité des fichiers
+-- Telechargement de l'integralite des fichiers
 for _, item in ipairs(data.tree) do
     if item.type == "blob" then
-        -- Ignore les dossiers internes comme .vscode
-        if not item.path:match("^%.vscode/") then
+        -- Ignore les dossiers internes
+        if not item.path:match("^%.vscode/") and not item.path:match("^%.git") then
             local file_url = RAW_BASE .. item.path
-            write("Téléchargement : " .. item.path .. "...")
+            write("Telechargement : " .. item.path .. "...")
             
             local file_resp = http.get(file_url)
             if file_resp then
                 local content = file_resp.readAll()
                 file_resp.close()
                 
+                -- Verification et creation du dossier parent si necessaire
+                local dir = fs.getDir(item.path)
+                if dir and dir ~= "" and not fs.exists(dir) then
+                    fs.makeDir(dir)
+                end
+
                 local f = fs.open(item.path, "w")
                 if f then
                     f.write(content)
@@ -57,4 +69,4 @@ for _, item in ipairs(data.tree) do
     end
 end
 
-print("\n[SUCCÈS] Tous les fichiers sont à jour !")
+print("\n[SUCCES] Tous les fichiers sont a jour !").
