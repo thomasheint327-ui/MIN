@@ -1,5 +1,4 @@
-﻿-- Configuration avec ton dépôt GitHub
-local USERNAME = "thomasheint327-ui"
+﻿local USERNAME = "thomasheint327-ui"
 local REPO     = "MIN"
 local BRANCH   = "main"
 
