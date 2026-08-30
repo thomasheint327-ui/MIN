@@ -57,6 +57,36 @@ local function get_current_altitude()
     return 0
 end
 
+local function set_thruster_power(power)
+    if thruster then
+        if thruster.setPowerNormalized then
+            thruster.setPowerNormalized(power)
+        elseif thruster.setThrustNormalized then
+            thruster.setThrustNormalized(power)
+        elseif thruster.setPower then
+            thruster.setPower(power)
+        elseif thruster.enable then
+            if power > 0 then thruster.enable() else thruster.disable() end
+        end
+    end
+end
+
+local function set_thruster_vector(x, y, z)
+    if not thruster then return end
+    if thruster.setVector then
+        thruster.setVector(x or 0, y or 0, z or 0)
+    else
+        if thruster.setVectorX then thruster.setVectorX(x or 0) end
+        if thruster.setVectorY then thruster.setVectorY(y or 0) end
+        if thruster.setVectorZ then thruster.setVectorZ(z or 0) end
+    end
+end
+
+local function push_missile()
+    set_thruster_vector(0, 1, 0)
+    set_thruster_power(1.0)
+end
+
 -- Lecture d'orientation (Conversion Radians -> Degrés)
 local function get_orientation_degrees()
     update_peripherals()
@@ -90,8 +120,7 @@ set_aileron_angle(aileron_pitch, 0)
 set_aileron_angle(aileron_yaw, 0)
 
 -- Allumage de la poussée vers le haut
-if thruster.setVector then thruster.setVector(0, 1, 0) end
-if thruster.setPower then thruster.setPower(1.0) elseif thruster.enable then thruster.enable() end
+push_missile()
 
 local flight_data = {
     launch_timestamp = os.epoch("utc"),
@@ -176,7 +205,7 @@ while running do
 end
 
 -- Coupure moteur et remise au neutre
-if thruster.setPower then thruster.setPower(0) end
+set_thruster_power(0)
 set_aileron_angle(aileron_pitch, 0)
 set_aileron_angle(aileron_yaw, 0)
 
